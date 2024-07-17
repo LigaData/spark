@@ -26,7 +26,7 @@
     <relativePath>../../pom.xml</relativePath>
   </parent>
 
-  <artifactId>spark-network-shuffle_2.12</artifactId>
+  <artifactId>spark-network-shuffle_2.11</artifactId>
   <packaging>jar</packaging>
   <name>Spark Project Shuffle Streaming Service</name>
   <url>http://spark.apache.org/</url>
