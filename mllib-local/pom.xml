@@ -25,7 +25,7 @@
     <relativePath>../pom.xml</relativePath>
   </parent>
 
-  <artifactId>spark-mllib-local_2.12</artifactId>
+  <artifactId>spark-mllib-local_2.11</artifactId>
   <properties>
     <sbt.project.name>mllib-local</sbt.project.name>
   </properties>

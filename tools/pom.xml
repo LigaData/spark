@@ -24,7 +24,7 @@
     <relativePath>../pom.xml</relativePath>
   </parent>
 
-  <artifactId>spark-tools_2.12</artifactId>
+  <artifactId>spark-tools_2.11</artifactId>
   <properties>
     <sbt.project.name>tools</sbt.project.name>
   </properties>

@@ -2615,7 +2615,7 @@
       </plugin>
       <plugin>
         <groupId>org.antipathy</groupId>
-        <artifactId>mvn-scalafmt_2.12</artifactId>
+        <artifactId>mvn-scalafmt_2.11</artifactId>
         <version>0.9_1.5.1</version>
         <configuration>
           <parameters>${scalafmt.parameters}</parameters> <!-- (Optional) Additional command line arguments -->

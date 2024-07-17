@@ -24,7 +24,7 @@
     <relativePath>../../../pom.xml</relativePath>
   </parent>
 
-  <artifactId>spark-kubernetes_2.12</artifactId>
+  <artifactId>spark-kubernetes_2.11</artifactId>
   <packaging>jar</packaging>
   <name>Spark Project Kubernetes</name>
   <properties>

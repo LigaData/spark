@@ -25,7 +25,7 @@
     <relativePath>../../pom.xml</relativePath>
   </parent>
 
-  <artifactId>spark-streaming-kafka-0-10-assembly_2.12</artifactId>
+  <artifactId>spark-streaming-kafka-0-10-assembly_2.11</artifactId>
   <packaging>jar</packaging>
   <name>Spark Integration for Kafka 0.10 Assembly</name>
   <url>http://spark.apache.org/</url>

@@ -25,7 +25,7 @@
     <relativePath>../pom.xml</relativePath>
   </parent>
 
-  <artifactId>spark-graphx_2.12</artifactId>
+  <artifactId>spark-graphx_2.11</artifactId>
   <properties>
     <sbt.project.name>graphx</sbt.project.name>
   </properties>
