@@ -20,7 +20,7 @@ package org.apache.spark.network.netty
 import scala.collection.JavaConverters._
 
 import org.apache.spark.SparkConf
-import org.apache.spark.network.util.{ConfigProvider, NettyUtils, TransportConf}
+import org.apache.spark.network.util.{ConfigProvider, TransportConf}
 
 /**
  * Provides a utility for transforming from a SparkConf inside a Spark JVM (e.g., Executor,
@@ -37,13 +37,15 @@ object SparkTransportConf {
    *                       use the given number of cores, rather than all of the machine's cores.
    *                       This restriction will only occur if these properties are not already set.
    */
+
+  private val MAX_DEFAULT_NETTY_THREADS = 8
   def fromSparkConf(_conf: SparkConf, module: String, numUsableCores: Int = 0): TransportConf = {
     val conf = _conf.clone
 
     // Specify thread configuration based on our JVM's allocation of cores (rather than necessarily
     // assuming we have all the machine's cores).
     // NB: Only set if serverThreads/clientThreads not already set.
-    val numThreads = NettyUtils.defaultNumThreads(numUsableCores)
+    val numThreads = defaultNumThreads(numUsableCores)
     conf.setIfMissing(s"spark.$module.io.serverThreads", numThreads.toString)
     conf.setIfMissing(s"spark.$module.io.clientThreads", numThreads.toString)
 
@@ -54,5 +56,11 @@ object SparkTransportConf {
         conf.getAll.toMap.asJava.entrySet()
       }
     })
+  }
+
+  private def defaultNumThreads(numUsableCores: Int): Int = {
+    val availableCores =
+      if (numUsableCores > 0) numUsableCores else Runtime.getRuntime.availableProcessors()
+    math.min(availableCores, MAX_DEFAULT_NETTY_THREADS)
   }
 }
