@@ -16,18 +16,33 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
+import scala.collection.JavaConverters._
+
 import org.apache.hadoop.fs.FileStatus
 
 import org.apache.spark.sql.{AnalysisException, SparkSession}
 import org.apache.spark.sql.execution.datasources._
-import org.apache.spark.sql.sources.v2.{SupportsBatchRead, Table}
+import org.apache.spark.sql.sources.v2.{SupportsBatchRead, SupportsBatchWrite, Table}
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.apache.spark.sql.util.SchemaUtils
 
 abstract class FileTable(
     sparkSession: SparkSession,
-    fileIndex: PartitioningAwareFileIndex,
-    userSpecifiedSchema: Option[StructType]) extends Table with SupportsBatchRead {
-  def getFileIndex: PartitioningAwareFileIndex = this.fileIndex
+    options: CaseInsensitiveStringMap,
+    paths: Seq[String],
+    userSpecifiedSchema: Option[StructType])
+  extends Table with SupportsBatchRead with SupportsBatchWrite {
+
+  lazy val fileIndex: PartitioningAwareFileIndex = {
+    val scalaMap = options.asScala.toMap
+    val hadoopConf = sparkSession.sessionState.newHadoopConfWithOptions(scalaMap)
+    val rootPathsSpecified = DataSource.checkAndGlobPathIfNecessary(paths, hadoopConf,
+      checkEmptyGlobPath = true, checkFilesExist = true)
+    val fileStatusCache = FileStatusCache.getOrCreate(sparkSession)
+    new InMemoryFileIndex(
+      sparkSession, rootPathsSpecified, scalaMap, userSpecifiedSchema, fileStatusCache)
+  }
 
   lazy val dataSchema: StructType = userSpecifiedSchema.orElse {
     inferSchema(fileIndex.allFiles())
@@ -36,10 +51,15 @@ abstract class FileTable(
       s"Unable to infer schema for $name. It must be specified manually.")
   }.asNullable
 
-  override def schema(): StructType = {
+  override lazy val schema: StructType = {
     val caseSensitive = sparkSession.sessionState.conf.caseSensitiveAnalysis
+    SchemaUtils.checkColumnNameDuplication(dataSchema.fieldNames,
+      "in the data schema", caseSensitive)
+    val partitionSchema = fileIndex.partitionSchema
+    SchemaUtils.checkColumnNameDuplication(partitionSchema.fieldNames,
+      "in the partition schema", caseSensitive)
     PartitioningUtils.mergeDataAndPartitionSchema(dataSchema,
-      fileIndex.partitionSchema, caseSensitive)._1
+      partitionSchema, caseSensitive)._1
   }
 
   /**
