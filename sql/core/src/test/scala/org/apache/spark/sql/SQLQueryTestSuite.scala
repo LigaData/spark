@@ -22,12 +22,12 @@ import java.util.{Locale, TimeZone}
 
 import scala.util.control.NonFatal
 
+import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.RuleExecutor
 import org.apache.spark.sql.catalyst.util.{fileToString, stringToFile}
-import org.apache.spark.sql.execution.HiveResult.hiveResultString
-import org.apache.spark.sql.execution.command.{DescribeColumnCommand, DescribeCommandBase}
+import org.apache.spark.sql.execution.command.{DescribeColumnCommand, DescribeTableCommand}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.types.StructType
@@ -48,14 +48,9 @@ import org.apache.spark.sql.types.StructType
  *   build/sbt "~sql/test-only *SQLQueryTestSuite -- -z inline-table.sql"
  * }}}
  *
- * To re-generate golden files for entire suite, run:
+ * To re-generate golden files, run:
  * {{{
  *   SPARK_GENERATE_GOLDEN_FILES=1 build/sbt "sql/test-only *SQLQueryTestSuite"
- * }}}
- *
- * To re-generate golden file for a single test, run:
- * {{{
- *   SPARK_GENERATE_GOLDEN_FILES=1 build/sbt "sql/test-only *SQLQueryTestSuite -- -z describe.sql"
  * }}}
  *
  * The format for input files is simple:
@@ -105,6 +100,10 @@ class SQLQueryTestSuite extends QueryTest with SharedSQLContext {
   private val inputFilePath = new File(baseResourcePath, "inputs").getAbsolutePath
   private val goldenFilePath = new File(baseResourcePath, "results").getAbsolutePath
 
+  protected override def sparkConf: SparkConf = super.sparkConf
+    // Fewer shuffle partitions to speed up testing.
+    .set(SQLConf.SHUFFLE_PARTITIONS, 4)
+
   /** List of test cases to ignore, in lower cases. */
   private val blackList = Set(
     "blacklist.sql",  // Do NOT remove this one. It is here to test the blacklist functionality.
@@ -142,50 +141,32 @@ class SQLQueryTestSuite extends QueryTest with SharedSQLContext {
     }
   }
 
-  // For better test coverage, runs the tests on mixed config sets: WHOLESTAGE_CODEGEN_ENABLED
-  // and CODEGEN_FACTORY_MODE.
-  private lazy val codegenConfigSets = Array(
-    ("true", "CODEGEN_ONLY"),
-    ("false", "CODEGEN_ONLY"),
-    ("false", "NO_CODEGEN")
-  ).map { case (wholeStageCodegenEnabled, codegenFactoryMode) =>
-    Array(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key -> wholeStageCodegenEnabled,
-      SQLConf.CODEGEN_FACTORY_MODE.key -> codegenFactoryMode)
-  }
-
   /** Run a test case. */
   private def runTest(testCase: TestCase): Unit = {
     val input = fileToString(new File(testCase.inputFile))
 
     val (comments, code) = input.split("\n").partition(_.startsWith("--"))
-
+    val configSets = {
+      val configLines = comments.filter(_.startsWith("--SET")).map(_.substring(5))
+      val configs = configLines.map(_.split(",").map { confAndValue =>
+        val (conf, value) = confAndValue.span(_ != '=')
+        conf.trim -> value.substring(1).trim
+      })
+      // When we are regenerating the golden files we don't need to run all the configs as they
+      // all need to return the same result
+      if (regenerateGoldenFiles && configs.nonEmpty) {
+        configs.take(1)
+      } else {
+        configs
+      }
+    }
     // List of SQL queries to run
     // note: this is not a robust way to split queries using semicolon, but works for now.
     val queries = code.mkString("\n").split("(?<=[^\\\\]);").map(_.trim).filter(_ != "").toSeq
 
-    // When we are regenerating the golden files, we don't need to set any config as they
-    // all need to return the same result
-    if (regenerateGoldenFiles) {
+    if (configSets.isEmpty) {
       runQueries(queries, testCase.resultFile, None)
     } else {
-      val configSets = {
-        val configLines = comments.filter(_.startsWith("--SET")).map(_.substring(5))
-        val configs = configLines.map(_.split(",").map { confAndValue =>
-          val (conf, value) = confAndValue.span(_ != '=')
-          conf.trim -> value.substring(1).trim
-        })
-
-        if (configs.nonEmpty) {
-          codegenConfigSets.flatMap { codegenConfig =>
-            configs.map { config =>
-              config ++ codegenConfig
-            }
-          }
-        } else {
-          codegenConfigSets
-        }
-      }
-
       configSets.foreach { configSet =>
         try {
           runQueries(queries, testCase.resultFile, Some(configSet))
@@ -268,7 +249,8 @@ class SQLQueryTestSuite extends QueryTest with SharedSQLContext {
       assertResult(expected.sql, s"SQL query did not match for query #$i\n${expected.sql}") {
         output.sql
       }
-      assertResult(expected.schema, s"Schema did not match for query #$i\n${expected.sql}") {
+      assertResult(expected.schema,
+        s"Schema did not match for query #$i\n${expected.sql}: $output") {
         output.schema
       }
       assertResult(expected.output, s"Result did not match for query #$i\n${expected.sql}") {
@@ -282,7 +264,7 @@ class SQLQueryTestSuite extends QueryTest with SharedSQLContext {
     // Returns true if the plan is supposed to be sorted.
     def isSorted(plan: LogicalPlan): Boolean = plan match {
       case _: Join | _: Aggregate | _: Generate | _: Sample | _: Distinct => false
-      case _: DescribeCommandBase | _: DescribeColumnCommand => true
+      case _: DescribeTableCommand | _: DescribeColumnCommand => true
       case PhysicalOperation(_, _, Sort(_, true, _)) => true
       case _ => plan.children.iterator.exists(isSorted)
     }
@@ -291,14 +273,15 @@ class SQLQueryTestSuite extends QueryTest with SharedSQLContext {
       val df = session.sql(sql)
       val schema = df.schema
       val notIncludedMsg = "[not included in comparison]"
+      val clsName = this.getClass.getCanonicalName
       // Get answer, but also get rid of the #1234 expression ids that show up in explain plans
-      val answer = hiveResultString(df.queryExecution.executedPlan)
-        .map(_.replaceAll("#\\d+", "#x")
-        .replaceAll("Location.*/sql/core/", s"Location ${notIncludedMsg}sql/core/")
+      val answer = df.queryExecution.hiveResultString().map(_.replaceAll("#\\d+", "#x")
+        .replaceAll(
+          s"Location.*/sql/core/spark-warehouse/$clsName/",
+          s"Location ${notIncludedMsg}sql/core/spark-warehouse/")
         .replaceAll("Created By.*", s"Created By $notIncludedMsg")
         .replaceAll("Created Time.*", s"Created Time $notIncludedMsg")
         .replaceAll("Last Access.*", s"Last Access $notIncludedMsg")
-        .replaceAll("Partition Statistics\t\\d+", s"Partition Statistics\t$notIncludedMsg")
         .replaceAll("\\*\\(\\d+\\) ", "*"))  // remove the WholeStageCodegen codegenStageIds
 
       // If the output is not pre-sorted, sort it.

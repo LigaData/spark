@@ -83,7 +83,6 @@ class SparkSession(object):
 
         _lock = RLock()
         _options = {}
-        _sc = None
 
         @since(2.0)
         def config(self, key=None, value=None, conf=None):
@@ -136,14 +135,9 @@ class SparkSession(object):
         @since(2.0)
         def enableHiveSupport(self):
             """Enables Hive support, including connectivity to a persistent Hive metastore, support
-            for Hive serdes, and Hive user-defined functions.
+            for Hive SerDes, and Hive user-defined functions.
             """
             return self.config("spark.sql.catalogImplementation", "hive")
-
-        def _sparkContext(self, sc):
-            with self._lock:
-                self._sc = sc
-                return self
 
         @since(2.0)
         def getOrCreate(self):
@@ -156,7 +150,7 @@ class SparkSession(object):
             default.
 
             >>> s1 = SparkSession.builder.config("k1", "v1").getOrCreate()
-            >>> s1.conf.get("k1") == "v1"
+            >>> s1.conf.get("k1") == s1.sparkContext.getConf().get("k1") == "v1"
             True
 
             In case an existing SparkSession is returned, the config options specified
@@ -173,26 +167,28 @@ class SparkSession(object):
                 from pyspark.conf import SparkConf
                 session = SparkSession._instantiatedSession
                 if session is None or session._sc._jsc is None:
-                    if self._sc is not None:
-                        sc = self._sc
-                    else:
-                        sparkConf = SparkConf()
-                        for key, value in self._options.items():
-                            sparkConf.set(key, value)
-                        # This SparkContext may be an existing one.
-                        sc = SparkContext.getOrCreate(sparkConf)
-                    # Do not update `SparkConf` for existing `SparkContext`, as it's shared
-                    # by all sessions.
+                    sparkConf = SparkConf()
+                    for key, value in self._options.items():
+                        sparkConf.set(key, value)
+                    sc = SparkContext.getOrCreate(sparkConf)
+                    # This SparkContext may be an existing one.
+                    for key, value in self._options.items():
+                        # we need to propagate the confs
+                        # before we create the SparkSession. Otherwise, confs like
+                        # warehouse path and metastore url will not be set correctly (
+                        # these confs cannot be changed once the SparkSession is created).
+                        sc._conf.set(key, value)
                     session = SparkSession(sc)
                 for key, value in self._options.items():
                     session._jsparkSession.sessionState().conf().setConfString(key, value)
+                for key, value in self._options.items():
+                    session.sparkContext._conf.set(key, value)
                 return session
 
     builder = Builder()
-    """A class attribute having a :class:`Builder` to construct :class:`SparkSession` instances"""
+    """A class attribute having a :class:`Builder` to construct :class:`SparkSession` instances."""
 
     _instantiatedSession = None
-    _activeSession = None
 
     @ignore_unicode_prefix
     def __init__(self, sparkContext, jsparkSession=None):
@@ -234,9 +230,7 @@ class SparkSession(object):
         if SparkSession._instantiatedSession is None \
                 or SparkSession._instantiatedSession._sc._jsc is None:
             SparkSession._instantiatedSession = self
-            SparkSession._activeSession = self
             self._jvm.SparkSession.setDefaultSession(self._jsparkSession)
-            self._jvm.SparkSession.setActiveSession(self._jsparkSession)
 
     def _repr_html_(self):
         return """
@@ -257,29 +251,6 @@ class SparkSession(object):
         table cache.
         """
         return self.__class__(self._sc, self._jsparkSession.newSession())
-
-    @classmethod
-    @since(3.0)
-    def getActiveSession(cls):
-        """
-        Returns the active SparkSession for the current thread, returned by the builder.
-        >>> s = SparkSession.getActiveSession()
-        >>> l = [('Alice', 1)]
-        >>> rdd = s.sparkContext.parallelize(l)
-        >>> df = s.createDataFrame(rdd, ['name', 'age'])
-        >>> df.select("age").collect()
-        [Row(age=1)]
-        """
-        from pyspark import SparkContext
-        sc = SparkContext._active_spark_context
-        if sc is None:
-            return None
-        else:
-            if sc._jvm.SparkSession.getActiveSession().isDefined():
-                SparkSession(sc, sc._jvm.SparkSession.getActiveSession().get())
-                return SparkSession._activeSession
-            else:
-                return None
 
     @property
     @since(2.0)
@@ -310,7 +281,7 @@ class SparkSession(object):
     @since(2.0)
     def catalog(self):
         """Interface through which the user may create, drop, alter or query underlying
-        databases, tables, functions etc.
+        databases, tables, functions, etc.
 
         :return: :class:`Catalog`
         """
@@ -553,13 +524,11 @@ class SparkSession(object):
 
         # Slice the DataFrame to be batched
         step = -(-len(pdf) // self.sparkContext.defaultParallelism)  # round int up
-        pdf_slices = (pdf[start:start + step] for start in xrange(0, len(pdf), step))
+        pdf_slices = (pdf.iloc[start:start + step] for start in xrange(0, len(pdf), step))
 
         # Create Arrow record batches
-        safecheck = self._wrapped._conf.arrowSafeTypeConversion()
-        col_by_name = True  # col by name only applies to StructType columns, can't happen here
         batches = [_create_batch([(c, t) for (_, c), t in zip(pdf_slice.iteritems(), arrow_types)],
-                                 timezone, safecheck, col_by_name)
+                                 timezone)
                    for pdf_slice in pdf_slices]
 
         # Create the Spark schema from the first Arrow batch (always at least 1 batch after slicing)
@@ -623,20 +592,20 @@ class SparkSession(object):
         will be inferred from ``data``.
 
         When ``schema`` is ``None``, it will try to infer the schema (column names and types)
-        from ``data``, which should be an RDD of :class:`Row`,
-        or :class:`namedtuple`, or :class:`dict`.
+        from ``data``, which should be an RDD of either :class:`Row`,
+        :class:`namedtuple`, or :class:`dict`.
 
         When ``schema`` is :class:`pyspark.sql.types.DataType` or a datatype string, it must match
         the real data, or an exception will be thrown at runtime. If the given schema is not
         :class:`pyspark.sql.types.StructType`, it will be wrapped into a
-        :class:`pyspark.sql.types.StructType` as its only field, and the field name will be "value",
-        each record will also be wrapped into a tuple, which can be converted to row later.
+        :class:`pyspark.sql.types.StructType` as its only field, and the field name will be "value".
+        Each record will also be wrapped into a tuple, which can be converted to row later.
 
         If schema inference is needed, ``samplingRatio`` is used to determined the ratio of
         rows used for schema inference. The first row will be used if ``samplingRatio`` is ``None``.
 
-        :param data: an RDD of any kind of SQL data representation(e.g. row, tuple, int, boolean,
-            etc.), or :class:`list`, or :class:`pandas.DataFrame`.
+        :param data: an RDD of any kind of SQL data representation (e.g. row, tuple, int, boolean,
+            etc.), :class:`list`, or :class:`pandas.DataFrame`.
         :param schema: a :class:`pyspark.sql.types.DataType` or a datatype string or a list of
             column names, default is ``None``.  The data type string format equals to
             :class:`pyspark.sql.types.DataType.simpleString`, except that top level struct type can
@@ -699,8 +668,6 @@ class SparkSession(object):
             ...
         Py4JJavaError: ...
         """
-        SparkSession._activeSession = self
-        self._jvm.SparkSession.setActiveSession(self._jsparkSession)
         if isinstance(data, DataFrame):
             raise TypeError("data is already a DataFrame")
 
@@ -840,7 +807,7 @@ class SparkSession(object):
     @since(2.0)
     def streams(self):
         """Returns a :class:`StreamingQueryManager` that allows managing all the
-        :class:`StreamingQuery` StreamingQueries active on `this` context.
+        :class:`StreamingQuery` instances active on `this` context.
 
         .. note:: Evolving.
 
@@ -856,9 +823,7 @@ class SparkSession(object):
         self._sc.stop()
         # We should clean the default session up. See SPARK-23228.
         self._jvm.SparkSession.clearDefaultSession()
-        self._jvm.SparkSession.clearActiveSession()
         SparkSession._instantiatedSession = None
-        SparkSession._activeSession = None
 
     @since(2.0)
     def __enter__(self):

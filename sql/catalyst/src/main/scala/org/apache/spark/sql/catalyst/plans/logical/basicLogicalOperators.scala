@@ -17,15 +17,15 @@
 
 package org.apache.spark.sql.catalyst.plans.logical
 
-import org.apache.spark.sql.catalyst.AliasIdentifier
+import org.apache.spark.sql.catalyst.{AliasIdentifier}
 import org.apache.spark.sql.catalyst.analysis.{MultiInstanceRelation, NamedRelation}
 import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable}
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction}
+import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning, RangePartitioning, RoundRobinPartitioning}
-import org.apache.spark.sql.catalyst.util.truncatedString
 import org.apache.spark.sql.types._
+import org.apache.spark.util.Utils
 import org.apache.spark.util.random.RandomSampler
 
 /**
@@ -64,7 +64,7 @@ case class Project(projectList: Seq[NamedExpression], child: LogicalPlan)
   }
 
   override def validConstraints: Set[Expression] =
-    getAllValidConstraints(projectList)
+    child.constraints.union(getAliasedConstraints(projectList))
 }
 
 /**
@@ -230,9 +230,19 @@ case class Union(children: Seq[LogicalPlan]) extends LogicalPlan {
   }
 
   // updating nullability to make all the children consistent
-  override def output: Seq[Attribute] =
-    children.map(_.output).transpose.map(attrs =>
-      attrs.head.withNullability(attrs.exists(_.nullable)))
+  override def output: Seq[Attribute] = {
+    children.map(_.output).transpose.map { attrs =>
+      val firstAttr = attrs.head
+      val nullable = attrs.exists(_.nullable)
+      val newDt = attrs.map(_.dataType).reduce(StructType.merge)
+      if (firstAttr.dataType == newDt) {
+        firstAttr.withNullability(nullable)
+      } else {
+        AttributeReference(firstAttr.name, newDt, nullable, firstAttr.metadata)(
+          firstAttr.exprId, firstAttr.qualifier)
+      }
+    }
+  }
 
   override lazy val resolved: Boolean = {
     // allChildrenCompatible needs to be evaluated after childrenResolved
@@ -288,8 +298,7 @@ case class Join(
     left: LogicalPlan,
     right: LogicalPlan,
     joinType: JoinType,
-    condition: Option[Expression],
-    hint: JoinHint)
+    condition: Option[Expression])
   extends BinaryNode with PredicateHelper {
 
   override def output: Seq[Attribute] = {
@@ -351,31 +360,19 @@ case class Join(
     case UsingJoin(_, _) => false
     case _ => resolvedExceptNatural
   }
-
-  // Ignore hint for canonicalization
-  protected override def doCanonicalize(): LogicalPlan =
-    super.doCanonicalize().asInstanceOf[Join].copy(hint = JoinHint.NONE)
-
-  // Do not include an empty join hint in string description
-  protected override def stringArgs: Iterator[Any] = super.stringArgs.filter { e =>
-    (!e.isInstanceOf[JoinHint]
-      || e.asInstanceOf[JoinHint].leftHint.isDefined
-      || e.asInstanceOf[JoinHint].rightHint.isDefined)
-  }
 }
 
 /**
- * Base trait for DataSourceV2 write commands
+ * Append data to an existing table.
  */
-trait V2WriteCommand extends Command {
-  def table: NamedRelation
-  def query: LogicalPlan
-
+case class AppendData(
+    table: NamedRelation,
+    query: LogicalPlan,
+    isByName: Boolean) extends LogicalPlan {
   override def children: Seq[LogicalPlan] = Seq(query)
+  override def output: Seq[Attribute] = Seq.empty
 
-  override lazy val resolved: Boolean = outputResolved
-
-  def outputResolved: Boolean = {
+  override lazy val resolved: Boolean = {
     table.resolved && query.resolved && query.output.size == table.output.size &&
         query.output.zip(table.output).forall {
           case (inAttr, outAttr) =>
@@ -387,65 +384,15 @@ trait V2WriteCommand extends Command {
   }
 }
 
-/**
- * Append data to an existing table.
- */
-case class AppendData(
-    table: NamedRelation,
-    query: LogicalPlan,
-    isByName: Boolean) extends V2WriteCommand
-
 object AppendData {
   def byName(table: NamedRelation, df: LogicalPlan): AppendData = {
-    new AppendData(table, df, isByName = true)
+    new AppendData(table, df, true)
   }
 
   def byPosition(table: NamedRelation, query: LogicalPlan): AppendData = {
-    new AppendData(table, query, isByName = false)
+    new AppendData(table, query, false)
   }
 }
-
-/**
- * Overwrite data matching a filter in an existing table.
- */
-case class OverwriteByExpression(
-    table: NamedRelation,
-    deleteExpr: Expression,
-    query: LogicalPlan,
-    isByName: Boolean) extends V2WriteCommand {
-  override lazy val resolved: Boolean = outputResolved && deleteExpr.resolved
-}
-
-object OverwriteByExpression {
-  def byName(
-      table: NamedRelation, df: LogicalPlan, deleteExpr: Expression): OverwriteByExpression = {
-    OverwriteByExpression(table, deleteExpr, df, isByName = true)
-  }
-
-  def byPosition(
-      table: NamedRelation, query: LogicalPlan, deleteExpr: Expression): OverwriteByExpression = {
-    OverwriteByExpression(table, deleteExpr, query, isByName = false)
-  }
-}
-
-/**
- * Dynamically overwrite partitions in an existing table.
- */
-case class OverwritePartitionsDynamic(
-    table: NamedRelation,
-    query: LogicalPlan,
-    isByName: Boolean) extends V2WriteCommand
-
-object OverwritePartitionsDynamic {
-  def byName(table: NamedRelation, df: LogicalPlan): OverwritePartitionsDynamic = {
-    OverwritePartitionsDynamic(table, df, isByName = true)
-  }
-
-  def byPosition(table: NamedRelation, query: LogicalPlan): OverwritePartitionsDynamic = {
-    OverwritePartitionsDynamic(table, query, isByName = false)
-  }
-}
-
 
 /**
  * Insert some data into a table. Note that this plan is unresolved and has to be replaced by the
@@ -525,13 +472,16 @@ case class View(
     output: Seq[Attribute],
     child: LogicalPlan) extends LogicalPlan with MultiInstanceRelation {
 
+  @transient
+  override lazy val references: AttributeSet = AttributeSet.empty
+
   override lazy val resolved: Boolean = child.resolved
 
   override def children: Seq[LogicalPlan] = child :: Nil
 
   override def newInstance(): LogicalPlan = copy(output = output.map(_.newInstance()))
 
-  override def simpleString(maxFields: Int): String = {
+  override def simpleString: String = {
     s"View (${desc.identifier}, ${output.mkString("[", ",", "]")})"
   }
 }
@@ -547,8 +497,8 @@ case class View(
 case class With(child: LogicalPlan, cteRelations: Seq[(String, SubqueryAlias)]) extends UnaryNode {
   override def output: Seq[Attribute] = child.output
 
-  override def simpleString(maxFields: Int): String = {
-    val cteAliases = truncatedString(cteRelations.map(_._1), "[", ", ", "]", maxFields)
+  override def simpleString: String = {
+    val cteAliases = Utils.truncatedString(cteRelations.map(_._1), "[", ", ", "]")
     s"CTE $cteAliases"
   }
 
@@ -620,7 +570,7 @@ case class Range(
 
   override def newInstance(): Range = copy(output = output.map(_.newInstance()))
 
-  override def simpleString(maxFields: Int): String = {
+  override def simpleString: String = {
     s"Range ($start, $end, step=$step, splits=$numSlices)"
   }
 
@@ -638,18 +588,6 @@ case class Range(
   }
 }
 
-/**
- * This is a Group by operator with the aggregate functions and projections.
- *
- * @param groupingExpressions expressions for grouping keys
- * @param aggregateExpressions expressions for a project list, which could contain
- *                             [[AggregateFunction]]s.
- *
- * Note: Currently, aggregateExpressions is the project list of this Group by operator. Before
- * separating projection from grouping and aggregate, we should avoid expression-level optimization
- * on aggregateExpressions, which could reference an expression in groupingExpressions.
- * For example, see the rule [[org.apache.spark.sql.catalyst.optimizer.SimplifyExtractValueOps]]
- */
 case class Aggregate(
     groupingExpressions: Seq[Expression],
     aggregateExpressions: Seq[NamedExpression],
@@ -670,7 +608,7 @@ case class Aggregate(
 
   override def validConstraints: Set[Expression] = {
     val nonAgg = aggregateExpressions.filter(_.find(_.isInstanceOf[AggregateExpression]).isEmpty)
-    getAllValidConstraints(nonAgg)
+    child.constraints.union(getAliasedConstraints(nonAgg))
   }
 }
 
@@ -732,11 +670,14 @@ object Expand {
     child: LogicalPlan): Expand = {
     val attrMap = groupByAttrs.zipWithIndex.toMap
 
+    val hasDuplicateGroupingSets = groupingSetsAttrs.size !=
+      groupingSetsAttrs.map(_.map(_.exprId).toSet).distinct.size
+
     // Create an array of Projections for the child projection, and replace the projections'
     // expressions which equal GroupBy expressions with Literal(null), if those expressions
     // are not set for this grouping set.
-    val projections = groupingSetsAttrs.map { groupingSetAttrs =>
-      child.output ++ groupByAttrs.map { attr =>
+    val projections = groupingSetsAttrs.zipWithIndex.map { case (groupingSetAttrs, i) =>
+      val projAttrs = child.output ++ groupByAttrs.map { attr =>
         if (!groupingSetAttrs.contains(attr)) {
           // if the input attribute in the Invalid Grouping Expression set of for this group
           // replace it with constant null
@@ -746,11 +687,25 @@ object Expand {
         }
       // groupingId is the last output, here we use the bit mask as the concrete value for it.
       } :+ Literal.create(buildBitmask(groupingSetAttrs, attrMap), IntegerType)
+
+      if (hasDuplicateGroupingSets) {
+        // If `groupingSetsAttrs` has duplicate entries (e.g., GROUPING SETS ((key), (key))),
+        // we add one more virtual grouping attribute (`_gen_grouping_pos`) to avoid
+        // wrongly grouping rows with the same grouping ID.
+        projAttrs :+ Literal.create(i, IntegerType)
+      } else {
+        projAttrs
+      }
     }
 
     // the `groupByAttrs` has different meaning in `Expand.output`, it could be the original
     // grouping expression or null, so here we create new instance of it.
-    val output = child.output ++ groupByAttrs.map(_.newInstance) :+ gid
+    val output = if (hasDuplicateGroupingSets) {
+      val gpos = AttributeReference("_gen_grouping_pos", IntegerType, false)()
+      child.output ++ groupByAttrs.map(_.newInstance) :+ gid :+ gpos
+    } else {
+      child.output ++ groupByAttrs.map(_.newInstance) :+ gid
+    }
     Expand(projections, output, Project(child.output ++ groupByAliases, child))
   }
 }
@@ -769,6 +724,8 @@ case class Expand(
     child: LogicalPlan) extends UnaryNode {
   override def references: AttributeSet =
     AttributeSet(projections.flatten.flatMap(_.references))
+
+  override def producedAttributes: AttributeSet = AttributeSet(output diff child.output)
 
   // This operator can reuse attributes (for example making them null when doing a roll up) so
   // the constraints of the child may no longer be valid.

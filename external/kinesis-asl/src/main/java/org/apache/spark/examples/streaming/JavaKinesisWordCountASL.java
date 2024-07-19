@@ -56,7 +56,7 @@ import com.amazonaws.services.kinesis.clientlibrary.lib.worker.InitialPositionIn
  * Example:
  *      # export AWS keys if necessary
  *      $ export AWS_ACCESS_KEY_ID=[your-access-key]
- *      $ export AWS_SECRET_KEY=<your-secret-key>
+ *      $ export AWS_SECRET_ACCESS_KEY=<your-secret-key>
  *
  *      # run the example
  *      $ SPARK_HOME/bin/run-example   streaming.JavaKinesisWordCountASL myAppName  mySparkStream \
@@ -67,7 +67,7 @@ import com.amazonaws.services.kinesis.clientlibrary.lib.worker.InitialPositionIn
  *
  * This code uses the DefaultAWSCredentialsProviderChain to find credentials
  * in the following order:
- *    Environment Variables - AWS_ACCESS_KEY_ID and AWS_SECRET_KEY
+ *    Environment Variables - AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
  *    Java System Properties - aws.accessKeyId and aws.secretKey
  *    Credential profiles file - default location (~/.aws/credentials) shared by all AWS SDKs
  *    Instance profile credentials - delivered through the Amazon EC2 metadata service
@@ -145,7 +145,7 @@ public final class JavaKinesisWordCountASL { // needs to be public for access fr
     // Union all the streams if there is more than 1 stream
     JavaDStream<byte[]> unionStreams;
     if (streamsList.size() > 1) {
-      unionStreams = jssc.union(streamsList.toArray(new JavaDStream[0]));
+      unionStreams = jssc.union(streamsList.get(0), streamsList.subList(1, streamsList.size()));
     } else {
       // Otherwise, just use the 1 stream
       unionStreams = streamsList.get(0);

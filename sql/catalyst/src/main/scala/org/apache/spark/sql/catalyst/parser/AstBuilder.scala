@@ -17,6 +17,7 @@
 
 package org.apache.spark.sql.catalyst.parser
 
+import java.sql.{Date, Timestamp}
 import java.util.Locale
 import javax.xml.bind.DatatypeConverter
 
@@ -36,10 +37,9 @@ import org.apache.spark.sql.catalyst.expressions.aggregate.{First, Last}
 import org.apache.spark.sql.catalyst.parser.SqlBaseParser._
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical._
-import org.apache.spark.sql.catalyst.util.DateTimeUtils.{getTimeZone, stringToDate, stringToTimestamp}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
-import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
+import org.apache.spark.unsafe.types.CalendarInterval
 import org.apache.spark.util.random.RandomSampler
 
 /**
@@ -115,10 +115,6 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
       checkDuplicateKeys(ctes, ctx)
       With(query, ctes)
     }
-  }
-
-  override def visitQueryToDesc(ctx: QueryToDescContext): LogicalPlan = withOrigin(ctx) {
-    plan(ctx.queryTerm).optionalMap(ctx.queryOrganization)(withQueryResultClauses)
   }
 
   /**
@@ -405,7 +401,7 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
         case p: Predicate => p
         case e => Cast(e, BooleanType)
       }
-      Filter(predicate, plan)
+      UnresolvedHaving(predicate, plan)
     }
 
 
@@ -519,7 +515,7 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
   override def visitFromClause(ctx: FromClauseContext): LogicalPlan = withOrigin(ctx) {
     val from = ctx.relation.asScala.foldLeft(null: LogicalPlan) { (left, relation) =>
       val right = plan(relation.relationPrimary)
-      val join = right.optionalMap(left)(Join(_, _, Inner, None, JoinHint.NONE))
+      val join = right.optionalMap(left)(Join(_, _, Inner, None))
       withJoinRelations(join, relation)
     }
     if (ctx.pivotClause() != null) {
@@ -682,9 +678,7 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
       UnresolvedGenerator(visitFunctionName(ctx.qualifiedName), expressions),
       unrequiredChildIndex = Nil,
       outer = ctx.OUTER != null,
-      // scalastyle:off caselocale
       Some(ctx.tblName.getText.toLowerCase),
-      // scalastyle:on caselocale
       ctx.colName.asScala.map(_.getText).map(UnresolvedAttribute.apply),
       query)
   }
@@ -720,7 +714,7 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
         // Resolve the join type and join condition
         val (joinType, condition) = Option(join.joinCriteria) match {
           case Some(c) if c.USING != null =>
-            (UsingJoin(baseJoinType, visitIdentifierList(c.identifierList)), None)
+            (UsingJoin(baseJoinType, c.identifier.asScala.map(_.getText)), None)
           case Some(c) if c.booleanExpression != null =>
             (baseJoinType, Option(expression(c.booleanExpression)))
           case None if join.NATURAL != null =>
@@ -731,7 +725,7 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
           case None =>
             (baseJoinType, None)
         }
-        Join(left, plan(join.right), joinType, condition, JoinHint.NONE)
+        Join(left, plan(join.right), joinType, condition)
       }
     }
   }
@@ -1178,7 +1172,7 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
       case SqlBaseParser.PERCENT =>
         Remainder(left, right)
       case SqlBaseParser.DIV =>
-        IntegralDivide(left, right)
+        Cast(Divide(left, right), LongType)
       case SqlBaseParser.PLUS =>
         Add(left, right)
       case SqlBaseParser.MINUS =>
@@ -1212,21 +1206,6 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
     }
   }
 
-  override def visitCurrentDatetime(ctx: CurrentDatetimeContext): Expression = withOrigin(ctx) {
-    if (conf.ansiParserEnabled) {
-      ctx.name.getType match {
-        case SqlBaseParser.CURRENT_DATE =>
-          CurrentDate()
-        case SqlBaseParser.CURRENT_TIMESTAMP =>
-          CurrentTimestamp()
-      }
-    } else {
-      // If the parser is not in ansi mode, we should return `UnresolvedAttribute`, in case there
-      // are columns named `CURRENT_DATE` or `CURRENT_TIMESTAMP`.
-      UnresolvedAttribute.quoted(ctx.name.getText)
-    }
-  }
-
   /**
    * Create a [[Cast]] expression.
    */
@@ -1246,7 +1225,7 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
    */
   override def visitFirst(ctx: FirstContext): Expression = withOrigin(ctx) {
     val ignoreNullsExpr = ctx.IGNORE != null
-    First(expression(ctx.expression), Literal(ignoreNullsExpr)).toAggregateExpression()
+    First(expression(ctx.expression), ignoreNullsExpr).toAggregateExpression()
   }
 
   /**
@@ -1254,7 +1233,7 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
    */
   override def visitLast(ctx: LastContext): Expression = withOrigin(ctx) {
     val ignoreNullsExpr = ctx.IGNORE != null
-    Last(expression(ctx.expression), Literal(ignoreNullsExpr)).toAggregateExpression()
+    Last(expression(ctx.expression), ignoreNullsExpr).toAggregateExpression()
   }
 
   /**
@@ -1571,17 +1550,12 @@ class AstBuilder(conf: SQLConf) extends SqlBaseBaseVisitor[AnyRef] with Logging 
   override def visitTypeConstructor(ctx: TypeConstructorContext): Literal = withOrigin(ctx) {
     val value = string(ctx.STRING)
     val valueType = ctx.identifier.getText.toUpperCase(Locale.ROOT)
-    def toLiteral[T](f: UTF8String => Option[T], t: DataType): Literal = {
-      f(UTF8String.fromString(value)).map(Literal(_, t)).getOrElse {
-        throw new ParseException(s"Cannot parse the $valueType value: $value", ctx)
-      }
-    }
     try {
       valueType match {
-        case "DATE" => toLiteral(stringToDate, DateType)
+        case "DATE" =>
+          Literal(Date.valueOf(value))
         case "TIMESTAMP" =>
-          val timeZone = getTimeZone(SQLConf.get.sessionLocalTimeZone)
-          toLiteral(stringToTimestamp(_, timeZone), TimestampType)
+          Literal(Timestamp.valueOf(value))
         case "X" =>
           val padding = if (value.length % 2 != 0) "0" else ""
           Literal(DatatypeConverter.parseHexBinary(padding + value))

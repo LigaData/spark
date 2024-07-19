@@ -22,7 +22,6 @@ import scala.collection.mutable.ArrayBuffer
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.expressions.BindReferences.bindReferences
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.expressions.codegen.Block._
 import org.apache.spark.sql.catalyst.plans._
@@ -174,7 +173,8 @@ case class SortMergeJoinExec(
               RowIterator.fromScala(leftIter),
               RowIterator.fromScala(rightIter),
               inMemoryThreshold,
-              spillThreshold
+              spillThreshold,
+              cleanupResources
             )
             private[this] val joinRow = new JoinedRow
 
@@ -218,7 +218,8 @@ case class SortMergeJoinExec(
             streamedIter = RowIterator.fromScala(leftIter),
             bufferedIter = RowIterator.fromScala(rightIter),
             inMemoryThreshold,
-            spillThreshold
+            spillThreshold,
+            cleanupResources
           )
           val rightNullRow = new GenericInternalRow(right.output.length)
           new LeftOuterIterator(
@@ -232,7 +233,8 @@ case class SortMergeJoinExec(
             streamedIter = RowIterator.fromScala(rightIter),
             bufferedIter = RowIterator.fromScala(leftIter),
             inMemoryThreshold,
-            spillThreshold
+            spillThreshold,
+            cleanupResources
           )
           val leftNullRow = new GenericInternalRow(left.output.length)
           new RightOuterIterator(
@@ -266,7 +268,8 @@ case class SortMergeJoinExec(
               RowIterator.fromScala(leftIter),
               RowIterator.fromScala(rightIter),
               inMemoryThreshold,
-              spillThreshold
+              spillThreshold,
+              cleanupResources
             )
             private[this] val joinRow = new JoinedRow
 
@@ -301,7 +304,8 @@ case class SortMergeJoinExec(
               RowIterator.fromScala(leftIter),
               RowIterator.fromScala(rightIter),
               inMemoryThreshold,
-              spillThreshold
+              spillThreshold,
+              cleanupResources
             )
             private[this] val joinRow = new JoinedRow
 
@@ -343,7 +347,8 @@ case class SortMergeJoinExec(
               RowIterator.fromScala(leftIter),
               RowIterator.fromScala(rightIter),
               inMemoryThreshold,
-              spillThreshold
+              spillThreshold,
+              cleanupResources
             )
             private[this] val joinRow = new JoinedRow
 
@@ -394,7 +399,7 @@ case class SortMergeJoinExec(
       input: Seq[Attribute]): Seq[ExprCode] = {
     ctx.INPUT_ROW = row
     ctx.currentVars = null
-    bindReferences(keys, input).map(_.genCode(ctx))
+    keys.map(BindReferences.bindReference(_, input).genCode(ctx))
   }
 
   private def copyKeys(ctx: CodegenContext, vars: Seq[ExprCode]): Seq[ExprCode] = {
@@ -495,7 +500,7 @@ case class SortMergeJoinExec(
          |        $leftRow = null;
          |      } else {
          |        $matches.add((UnsafeRow) $rightRow);
-         |        $rightRow = null;
+         |        $rightRow = null;;
          |      }
          |    } while ($leftRow != null);
          |  }
@@ -623,6 +628,9 @@ case class SortMergeJoinExec(
       (evaluateVariables(leftVars), "")
     }
 
+    val thisPlan = ctx.addReferenceObj("plan", this)
+    val eagerCleanup = s"$thisPlan.cleanupResources();"
+
     s"""
        |while (findNextInnerJoinRows($leftInput, $rightInput)) {
        |  ${leftVarDecl.mkString("\n")}
@@ -636,6 +644,7 @@ case class SortMergeJoinExec(
        |  }
        |  if (shouldStop()) return;
        |}
+       |$eagerCleanup
      """.stripMargin
   }
 }
@@ -661,6 +670,7 @@ case class SortMergeJoinExec(
  * @param inMemoryThreshold Threshold for number of rows guaranteed to be held in memory by
  *                          internal buffer
  * @param spillThreshold Threshold for number of rows to be spilled by internal buffer
+ * @param eagerCleanupResources the eager cleanup function to be invoked when no join row found
  */
 private[joins] class SortMergeJoinScanner(
     streamedKeyGenerator: Projection,
@@ -669,7 +679,8 @@ private[joins] class SortMergeJoinScanner(
     streamedIter: RowIterator,
     bufferedIter: RowIterator,
     inMemoryThreshold: Int,
-    spillThreshold: Int) {
+    spillThreshold: Int,
+    eagerCleanupResources: () => Unit) {
   private[this] var streamedRow: InternalRow = _
   private[this] var streamedRowKey: InternalRow = _
   private[this] var bufferedRow: InternalRow = _
@@ -693,7 +704,8 @@ private[joins] class SortMergeJoinScanner(
   def getBufferedMatches: ExternalAppendOnlyUnsafeRowArray = bufferedMatches
 
   /**
-   * Advances both input iterators, stopping when we have found rows with matching join keys.
+   * Advances both input iterators, stopping when we have found rows with matching join keys. If no
+   * join rows found, try to do the eager resources cleanup.
    * @return true if matching rows have been found and false otherwise. If this returns true, then
    *         [[getStreamedRow]] and [[getBufferedMatches]] can be called to construct the join
    *         results.
@@ -703,7 +715,7 @@ private[joins] class SortMergeJoinScanner(
       // Advance the streamed side of the join until we find the next row whose join key contains
       // no nulls or we hit the end of the streamed iterator.
     }
-    if (streamedRow == null) {
+    val found = if (streamedRow == null) {
       // We have consumed the entire streamed iterator, so there can be no more matches.
       matchJoinKey = null
       bufferedMatches.clear()
@@ -743,17 +755,19 @@ private[joins] class SortMergeJoinScanner(
         true
       }
     }
+    if (!found) eagerCleanupResources()
+    found
   }
 
   /**
    * Advances the streamed input iterator and buffers all rows from the buffered input that
-   * have matching keys.
+   * have matching keys. If no join rows found, try to do the eager resources cleanup.
    * @return true if the streamed iterator returned a row, false otherwise. If this returns true,
    *         then [[getStreamedRow]] and [[getBufferedMatches]] can be called to produce the outer
    *         join results.
    */
   final def findNextOuterJoinRows(): Boolean = {
-    if (!advancedStreamed()) {
+    val found = if (!advancedStreamed()) {
       // We have consumed the entire streamed iterator, so there can be no more matches.
       matchJoinKey = null
       bufferedMatches.clear()
@@ -783,6 +797,8 @@ private[joins] class SortMergeJoinScanner(
       // If there is a streamed input then we always return true
       true
     }
+    if (!found) eagerCleanupResources()
+    found
   }
 
   // --- Private methods --------------------------------------------------------------------------

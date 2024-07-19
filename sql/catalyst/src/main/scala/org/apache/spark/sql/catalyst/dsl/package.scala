@@ -72,7 +72,6 @@ package object dsl {
     def - (other: Expression): Expression = Subtract(expr, other)
     def * (other: Expression): Expression = Multiply(expr, other)
     def / (other: Expression): Expression = Divide(expr, other)
-    def div (other: Expression): Expression = IntegralDivide(expr, other)
     def % (other: Expression): Expression = Remainder(expr, other)
     def & (other: Expression): Expression = BitwiseAnd(expr, other)
     def | (other: Expression): Expression = BitwiseOr(expr, other)
@@ -136,7 +135,7 @@ package object dsl {
     implicit def longToLiteral(l: Long): Literal = Literal(l)
     implicit def floatToLiteral(f: Float): Literal = Literal(f)
     implicit def doubleToLiteral(d: Double): Literal = Literal(d)
-    implicit def stringToLiteral(s: String): Literal = Literal.create(s, StringType)
+    implicit def stringToLiteral(s: String): Literal = Literal(s)
     implicit def dateToLiteral(d: Date): Literal = Literal(d)
     implicit def bigDecimalToLiteral(d: BigDecimal): Literal = Literal(d.underlying())
     implicit def bigDecimalToLiteral(d: java.math.BigDecimal): Literal = Literal(d)
@@ -325,7 +324,7 @@ package object dsl {
         otherPlan: LogicalPlan,
         joinType: JoinType = Inner,
         condition: Option[Expression] = None): LogicalPlan =
-        Join(logicalPlan, otherPlan, joinType, condition, JoinHint.NONE)
+        Join(logicalPlan, otherPlan, joinType, condition)
 
       def cogroup[Key: Encoder, Left: Encoder, Right: Encoder, Result: Encoder](
           otherPlan: LogicalPlan,
@@ -355,6 +354,14 @@ package object dsl {
           case e => Alias(e, e.toString)()
         }
         Aggregate(groupingExprs, aliasedExprs, logicalPlan)
+      }
+
+      def having(
+          groupingExprs: Expression*)(
+          aggregateExprs: Expression*)(
+          havingCondition: Expression): LogicalPlan = {
+        UnresolvedHaving(havingCondition,
+          groupBy(groupingExprs: _*)(aggregateExprs: _*).asInstanceOf[Aggregate])
       }
 
       def window(

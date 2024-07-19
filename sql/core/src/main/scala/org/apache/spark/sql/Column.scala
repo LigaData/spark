@@ -20,7 +20,7 @@ package org.apache.spark.sql
 import scala.collection.JavaConverters._
 import scala.language.implicitConversions
 
-import org.apache.spark.annotation.Stable
+import org.apache.spark.annotation.InterfaceStability
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.analysis._
 import org.apache.spark.sql.catalyst.encoders.{encoderFor, ExpressionEncoder}
@@ -60,7 +60,7 @@ private[sql] object Column {
  *
  * @since 1.6.0
  */
-@Stable
+@InterfaceStability.Stable
 class TypedColumn[-T, U](
     expr: Expression,
     private[sql] val encoder: ExpressionEncoder[U])
@@ -74,9 +74,6 @@ class TypedColumn[-T, U](
       inputEncoder: ExpressionEncoder[_],
       inputAttributes: Seq[Attribute]): TypedColumn[T, U] = {
     val unresolvedDeserializer = UnresolvedDeserializer(inputEncoder.deserializer, inputAttributes)
-
-    // This only inserts inputs into typed aggregate expressions. For untyped aggregate expressions,
-    // the resolving is handled in the analyzer directly.
     val newExpr = expr transform {
       case ta: TypedAggregateExpression if ta.inputDeserializer.isEmpty =>
         ta.withInputInfo(
@@ -130,7 +127,7 @@ class TypedColumn[-T, U](
  *
  * @since 1.3.0
  */
-@Stable
+@InterfaceStability.Stable
 class Column(val expr: Expression) extends Logging {
 
   def this(name: String) = this(name match {
@@ -304,6 +301,24 @@ class Column(val expr: Expression) extends Logging {
    * @since 2.0.0
     */
   def =!= (other: Any): Column = withExpr{ Not(EqualTo(expr, lit(other).expr)) }
+
+  /**
+   * Inequality test.
+   * {{{
+   *   // Scala:
+   *   df.select( df("colA") !== df("colB") )
+   *   df.select( !(df("colA") === df("colB")) )
+   *
+   *   // Java:
+   *   import static org.apache.spark.sql.functions.*;
+   *   df.filter( col("colA").notEqual(col("colB")) );
+   * }}}
+   *
+   * @group expr_ops
+   * @since 1.3.0
+    */
+  @deprecated("!== does not have the same precedence as ===, use =!= instead", "2.0.0")
+  def !== (other: Any): Column = this =!= other
 
   /**
    * Inequality test.
@@ -1227,7 +1242,7 @@ class Column(val expr: Expression) extends Logging {
  *
  * @since 1.3.0
  */
-@Stable
+@InterfaceStability.Stable
 class ColumnName(name: String) extends Column(name) {
 
   /**

@@ -85,15 +85,15 @@ object PersistedView extends ViewType
  * @param viewType the expected view type to be created with this command.
  */
 case class CreateViewCommand(
-    name: TableIdentifier,
-    userSpecifiedColumns: Seq[(String, Option[String])],
-    comment: Option[String],
-    properties: Map[String, String],
-    originalText: Option[String],
-    child: LogicalPlan,
-    allowExisting: Boolean,
-    replace: Boolean,
-    viewType: ViewType)
+                              name: TableIdentifier,
+                              userSpecifiedColumns: Seq[(String, Option[String])],
+                              comment: Option[String],
+                              properties: Map[String, String],
+                              originalText: Option[String],
+                              child: LogicalPlan,
+                              allowExisting: Boolean,
+                              replace: Boolean,
+                              viewType: ViewType)
   extends RunnableCommand {
 
   import ViewHelper._
@@ -130,7 +130,7 @@ case class CreateViewCommand(
     val analyzedPlan = qe.analyzed
 
     if (userSpecifiedColumns.nonEmpty &&
-        userSpecifiedColumns.length != analyzedPlan.output.length) {
+      userSpecifiedColumns.length != analyzedPlan.output.length) {
       throw new AnalysisException(s"The number of columns produced by the SELECT clause " +
         s"(num: `${analyzedPlan.output.length}`) does not match the number of column names " +
         s"specified by CREATE VIEW (num: `${userSpecifiedColumns.length}`).")
@@ -262,9 +262,9 @@ case class CreateViewCommand(
  *              schema.
  */
 case class AlterViewAsCommand(
-    name: TableIdentifier,
-    originalText: String,
-    query: LogicalPlan) extends RunnableCommand {
+                               name: TableIdentifier,
+                               originalText: String,
+                               query: LogicalPlan) extends RunnableCommand {
 
   import ViewHelper._
 
@@ -355,9 +355,9 @@ object ViewHelper {
    * @return new view properties including view default database and query column names properties.
    */
   def generateViewProperties(
-      properties: Map[String, String],
-      session: SparkSession,
-      analyzedPlan: LogicalPlan): Map[String, String] = {
+                              properties: Map[String, String],
+                              session: SparkSession,
+                              analyzedPlan: LogicalPlan): Map[String, String] = {
     val queryOutput = analyzedPlan.schema.fieldNames
 
     // Generate the query column names, throw an AnalysisException if there exists duplicate column
@@ -390,9 +390,9 @@ object ViewHelper {
    *                  `desc.identifier`.
    */
   def checkCyclicViewReference(
-      plan: LogicalPlan,
-      path: Seq[TableIdentifier],
-      viewIdent: TableIdentifier): Unit = {
+                                plan: LogicalPlan,
+                                path: Seq[TableIdentifier],
+                                viewIdent: TableIdentifier): Unit = {
     plan match {
       case v: View =>
         val ident = v.desc.identifier

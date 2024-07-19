@@ -41,11 +41,6 @@ name (i.e., `org.apache.spark.sql.parquet`), but for built-in sources you can al
 names (`json`, `parquet`, `jdbc`, `orc`, `libsvm`, `csv`, `text`). DataFrames loaded from any data
 source type can be converted into other types using this syntax.
 
-Please refer the API documentation for available options of built-in sources, for example,
-`org.apache.spark.sql.DataFrameReader` and `org.apache.spark.sql.DataFrameWriter`. The
-options documented there should be applicable through non-Scala Spark APIs (e.g. PySpark)
-as well. For other formats, refer to the API documentation of the particular format.
-
 To load a JSON file you can use:
 
 <div class="codetabs">
@@ -89,7 +84,7 @@ To load a CSV file you can use:
 
 The extra options are also used during write operation.
 For example, you can control bloom filters and dictionary encodings for ORC data sources.
-The following ORC example will create bloom filter and use dictionary encoding only for `favorite_color`.
+The following ORC example will create bloom filter on `favorite_color` and use dictionary encoding for `name` and `favorite_color`.
 For Parquet, there exists `parquet.enable.dictionary`, too.
 To find more detailed information about the extra ORC/Parquet options,
 visit the official Apache ORC/Parquet websites.
@@ -122,8 +117,7 @@ CREATE TABLE users_with_options (
 ) USING ORC
 OPTIONS (
   orc.bloom.filter.columns 'favorite_color',
-  orc.dictionary.key.threshold '1.0',
-  orc.column.encoding.direct 'name'
+  orc.dictionary.key.threshold '1.0'
 )
 {% endhighlight %}
 
@@ -329,4 +323,4 @@ CLUSTERED BY(name) SORTED BY (favorite_numbers) INTO 42 BUCKETS;
 `partitionBy` creates a directory structure as described in the [Partition Discovery](sql-data-sources-parquet.html#partition-discovery) section.
 Thus, it has limited applicability to columns with high cardinality. In contrast
  `bucketBy` distributes
-data across a fixed number of buckets and can be used when the number of unique values is unbounded.
+data across a fixed number of buckets and can be used when a number of unique values is unbounded.

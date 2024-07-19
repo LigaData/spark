@@ -18,7 +18,8 @@
 package org.apache.spark.sql.execution.streaming
 
 import java.net.URI
-import java.util.concurrent.TimeUnit._
+
+import scala.collection.JavaConverters._
 
 import org.apache.hadoop.fs.{FileStatus, Path}
 
@@ -207,7 +208,7 @@ class FileStreamSource(
     var allFiles: Seq[FileStatus] = null
     sourceHasMetadata match {
       case None =>
-        if (FileStreamSink.hasMetadata(Seq(path), hadoopConf, sparkSession.sessionState.conf)) {
+        if (FileStreamSink.hasMetadata(Seq(path), hadoopConf)) {
           sourceHasMetadata = Some(true)
           allFiles = allFilesUsingMetadataLogFileIndex()
         } else {
@@ -219,7 +220,7 @@ class FileStreamSource(
             // double check whether source has metadata, preventing the extreme corner case that
             // metadata log and data files are only generated after the previous
             // `FileStreamSink.hasMetadata` check
-            if (FileStreamSink.hasMetadata(Seq(path), hadoopConf, sparkSession.sessionState.conf)) {
+            if (FileStreamSink.hasMetadata(Seq(path), hadoopConf)) {
               sourceHasMetadata = Some(true)
               allFiles = allFilesUsingMetadataLogFileIndex()
             } else {
@@ -236,7 +237,7 @@ class FileStreamSource(
       (status.getPath.toUri.toString, status.getModificationTime)
     }
     val endTime = System.nanoTime
-    val listingTimeMs = NANOSECONDS.toMillis(endTime - startTime)
+    val listingTimeMs = (endTime.toDouble - startTime) / 1000000
     if (listingTimeMs > 2000) {
       // Output a warning when listing files uses more than 2 seconds.
       logWarning(s"Listed ${files.size} file(s) in $listingTimeMs ms")

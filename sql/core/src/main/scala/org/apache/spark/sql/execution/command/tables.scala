@@ -21,26 +21,27 @@ import java.io.File
 import java.net.{URI, URISyntaxException}
 import java.nio.file.FileSystems
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Try
 import scala.util.control.NonFatal
 
 import org.apache.hadoop.fs.{FileContext, FsConstants, Path}
+import org.apache.hadoop.fs.permission.{AclEntry, AclEntryScope, AclEntryType, FsAction, FsPermission}
 
 import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.analysis.{NoSuchPartitionException, UnresolvedAttribute, UnresolvedRelation}
+import org.apache.spark.sql.catalyst.analysis.{NoSuchPartitionException, UnresolvedAttribute}
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.catalog.CatalogTableType._
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
-import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.catalyst.plans.logical.Histogram
 import org.apache.spark.sql.catalyst.util.{escapeSingleQuotedString, quoteIdentifier}
 import org.apache.spark.sql.execution.datasources.{DataSource, PartitioningUtils}
 import org.apache.spark.sql.execution.datasources.csv.CSVFileFormat
 import org.apache.spark.sql.execution.datasources.json.JsonFileFormat
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
-import org.apache.spark.sql.execution.datasources.v2.orc.OrcDataSourceV2
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.SchemaUtils
@@ -160,11 +161,7 @@ case class AlterTableRenameCommand(
       // this can happen with Hive tables when the underlying catalog is in-memory.
       val wasCached = Try(sparkSession.catalog.isCached(oldName.unquotedString)).getOrElse(false)
       if (wasCached) {
-        try {
-          sparkSession.catalog.uncacheTable(oldName.unquotedString)
-        } catch {
-          case NonFatal(e) => log.warn(e.toString, e)
-        }
+        CommandUtils.uncacheTableOrView(sparkSession, oldName.unquotedString)
       }
       // Invalidate the table last, otherwise uncaching the table would load the logical plan
       // back into the hive metastore cache
@@ -194,12 +191,7 @@ case class AlterTableAddColumnsCommand(
     val catalog = sparkSession.sessionState.catalog
     val catalogTable = verifyAlterTableAddColumn(sparkSession.sessionState.conf, catalog, table)
 
-    try {
-      sparkSession.catalog.uncacheTable(table.quotedString)
-    } catch {
-      case NonFatal(e) =>
-        log.warn(s"Exception when attempting to uncache table ${table.quotedString}", e)
-    }
+    CommandUtils.uncacheTableOrView(sparkSession, table.quotedString)
     catalog.refreshTable(table)
 
     SchemaUtils.checkColumnNameDuplication(
@@ -215,7 +207,7 @@ case class AlterTableAddColumnsCommand(
   /**
    * ALTER TABLE ADD COLUMNS command does not support temporary view/table,
    * view, or datasource table with text, orc formats or external provider.
-   * For datasource table, it currently only supports parquet, json, csv, orc.
+   * For datasource table, it currently only supports parquet, json, csv.
    */
   private def verifyAlterTableAddColumn(
       conf: SQLConf,
@@ -232,13 +224,12 @@ case class AlterTableAddColumnsCommand(
     }
 
     if (DDLUtils.isDatasourceTable(catalogTable)) {
-      DataSource.lookupDataSource(catalogTable.provider.get, conf).
-        getConstructor().newInstance() match {
+      DataSource.lookupDataSource(catalogTable.provider.get, conf).newInstance() match {
         // For datasource table, this command can only support the following File format.
         // TextFileFormat only default to one column "value"
         // Hive type is already considered as hive serde table, so the logic will not
         // come in here.
-        case _: JsonFileFormat | _: CSVFileFormat | _: ParquetFileFormat | _: OrcDataSourceV2 =>
+        case _: JsonFileFormat | _: CSVFileFormat | _: ParquetFileFormat =>
         case s if s.getClass.getCanonicalName.endsWith("OrcFileFormat") =>
         case s =>
           throw new AnalysisException(
@@ -459,13 +450,73 @@ case class TruncateTableCommand(
         partLocations
       }
     val hadoopConf = spark.sessionState.newHadoopConf()
+    val ignorePermissionAcl = SQLConf.get.truncateTableIgnorePermissionAcl
     locations.foreach { location =>
       if (location.isDefined) {
         val path = new Path(location.get)
         try {
           val fs = path.getFileSystem(hadoopConf)
+
+          // Not all fs impl. support these APIs.
+          var optPermission: Option[FsPermission] = None
+          var optAcls: Option[java.util.List[AclEntry]] = None
+          if (!ignorePermissionAcl) {
+            try {
+              val fileStatus = fs.getFileStatus(path)
+              optPermission = Some(fileStatus.getPermission())
+            } catch {
+              case NonFatal(_) => // do nothing
+            }
+
+            try {
+              optAcls = Some(fs.getAclStatus(path).getEntries)
+            } catch {
+              case NonFatal(_) => // do nothing
+            }
+          }
+
           fs.delete(path, true)
+          // We should keep original permission/acl of the path.
+          // For owner/group, only super-user can set it, for example on HDFS. Because
+          // current user can delete the path, we assume the user/group is correct or not an issue.
           fs.mkdirs(path)
+          if (!ignorePermissionAcl) {
+            optPermission.foreach { permission =>
+              try {
+                fs.setPermission(path, permission)
+              } catch {
+                case NonFatal(e) =>
+                  throw new SecurityException(
+                    s"Failed to set original permission $permission back to " +
+                      s"the created path: $path. Exception: ${e.getMessage}")
+              }
+            }
+            optAcls.foreach { acls =>
+              val aclEntries = acls.asScala.filter(_.getName != null).asJava
+
+              // If the path doesn't have default ACLs, `setAcl` API will throw an error
+              // as it expects user/group/other permissions must be in ACL entries.
+              // So we need to add tradition user/group/other permission
+              // in the form of ACL.
+              optPermission.map { permission =>
+                aclEntries.add(newAclEntry(AclEntryScope.ACCESS,
+                  AclEntryType.USER, permission.getUserAction()))
+                aclEntries.add(newAclEntry(AclEntryScope.ACCESS,
+                  AclEntryType.GROUP, permission.getGroupAction()))
+                aclEntries.add(newAclEntry(AclEntryScope.ACCESS,
+                  AclEntryType.OTHER, permission.getOtherAction()))
+              }
+
+              try {
+                fs.setAcl(path, aclEntries)
+              } catch {
+                case NonFatal(e) =>
+                  throw new SecurityException(
+                    s"Failed to set original ACL $aclEntries back to " +
+                      s"the created path: $path. Exception: ${e.getMessage}")
+              }
+            }
+          }
         } catch {
           case NonFatal(e) =>
             throw new AnalysisException(
@@ -492,36 +543,18 @@ case class TruncateTableCommand(
     }
     Seq.empty[Row]
   }
-}
 
-abstract class DescribeCommandBase extends RunnableCommand {
-  override val output: Seq[Attribute] = Seq(
-    // Column names are based on Hive.
-    AttributeReference("col_name", StringType, nullable = false,
-      new MetadataBuilder().putString("comment", "name of the column").build())(),
-    AttributeReference("data_type", StringType, nullable = false,
-      new MetadataBuilder().putString("comment", "data type of the column").build())(),
-    AttributeReference("comment", StringType, nullable = true,
-      new MetadataBuilder().putString("comment", "comment of the column").build())()
-  )
-
-  protected def describeSchema(
-      schema: StructType,
-      buffer: ArrayBuffer[Row],
-      header: Boolean): Unit = {
-    if (header) {
-      append(buffer, s"# ${output.head.name}", output(1).name, output(2).name)
-    }
-    schema.foreach { column =>
-      append(buffer, column.name, column.dataType.simpleString, column.getComment().orNull)
-    }
-  }
-
-  protected def append(
-    buffer: ArrayBuffer[Row], column: String, dataType: String, comment: String): Unit = {
-    buffer += Row(column, dataType, comment)
+  private def newAclEntry(
+      scope: AclEntryScope,
+      aclType: AclEntryType,
+      permission: FsAction): AclEntry = {
+    new AclEntry.Builder()
+      .setScope(scope)
+      .setType(aclType)
+      .setPermission(permission).build()
   }
 }
+
 /**
  * Command that looks like
  * {{{
@@ -532,7 +565,17 @@ case class DescribeTableCommand(
     table: TableIdentifier,
     partitionSpec: TablePartitionSpec,
     isExtended: Boolean)
-  extends DescribeCommandBase {
+  extends RunnableCommand {
+
+  override val output: Seq[Attribute] = Seq(
+    // Column names are based on Hive.
+    AttributeReference("col_name", StringType, nullable = false,
+      new MetadataBuilder().putString("comment", "name of the column").build())(),
+    AttributeReference("data_type", StringType, nullable = false,
+      new MetadataBuilder().putString("comment", "data type of the column").build())(),
+    AttributeReference("comment", StringType, nullable = true,
+      new MetadataBuilder().putString("comment", "comment of the column").build())()
+  )
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
     val result = new ArrayBuffer[Row]
@@ -621,31 +664,22 @@ case class DescribeTableCommand(
     }
     table.storage.toLinkedHashMap.foreach(s => append(buffer, s._1, s._2, ""))
   }
-}
 
-/**
- * Command that looks like
- * {{{
- *   DESCRIBE [QUERY] statement
- * }}}
- *
- * Parameter 'statement' can be one of the following types :
- * 1. SELECT statements
- * 2. SELECT statements inside set operators (UNION, INTERSECT etc)
- * 3. VALUES statement.
- * 4. TABLE statement. Example : TABLE table_name
- * 5. statements of the form 'FROM table SELECT *'
- *
- * TODO : support CTEs.
- */
-case class DescribeQueryCommand(query: LogicalPlan)
-  extends DescribeCommandBase {
+  private def describeSchema(
+      schema: StructType,
+      buffer: ArrayBuffer[Row],
+      header: Boolean): Unit = {
+    if (header) {
+      append(buffer, s"# ${output.head.name}", output(1).name, output(2).name)
+    }
+    schema.foreach { column =>
+      append(buffer, column.name, column.dataType.simpleString, column.getComment().orNull)
+    }
+  }
 
-  override def run(sparkSession: SparkSession): Seq[Row] = {
-    val result = new ArrayBuffer[Row]
-    val queryExecution = sparkSession.sessionState.executePlan(query)
-    describeSchema(queryExecution.analyzed.schema, result, header = false)
-    result
+  private def append(
+      buffer: ArrayBuffer[Row], column: String, dataType: String, comment: String): Unit = {
+    buffer += Row(column, dataType, comment)
   }
 }
 
@@ -987,11 +1021,9 @@ case class ShowCreateTableCommand(table: TableIdentifier) extends RunnableComman
       builder ++= metadata.viewText.mkString(" AS\n", "", "\n")
     } else {
       showHiveTableHeader(metadata, builder)
-      showTableComment(metadata, builder)
       showHiveTableNonDataColumns(metadata, builder)
       showHiveTableStorageInfo(metadata, builder)
-      showTableLocation(metadata, builder)
-      showTableProperties(metadata, builder)
+      showHiveTableProperties(metadata, builder)
     }
 
     builder.toString()
@@ -1005,7 +1037,13 @@ case class ShowCreateTableCommand(table: TableIdentifier) extends RunnableComman
     if (columns.nonEmpty) {
       builder ++= columns.mkString("(", ", ", ")\n")
     }
+
+    metadata
+      .comment
+      .map("COMMENT '" + escapeSingleQuotedString(_) + "'\n")
+      .foreach(builder.append)
   }
+
 
   private def showHiveTableNonDataColumns(metadata: CatalogTable, builder: StringBuilder): Unit = {
     if (metadata.partitionColumnNames.nonEmpty) {
@@ -1049,24 +1087,15 @@ case class ShowCreateTableCommand(table: TableIdentifier) extends RunnableComman
         builder ++= s"  OUTPUTFORMAT '${escapeSingleQuotedString(format)}'\n"
       }
     }
-  }
 
-  private def showTableLocation(metadata: CatalogTable, builder: StringBuilder): Unit = {
     if (metadata.tableType == EXTERNAL) {
-      metadata.storage.locationUri.foreach { location =>
-        builder ++= s"LOCATION '${escapeSingleQuotedString(CatalogUtils.URIToString(location))}'\n"
+      storage.locationUri.foreach { uri =>
+        builder ++= s"LOCATION '$uri'\n"
       }
     }
   }
 
-  private def showTableComment(metadata: CatalogTable, builder: StringBuilder): Unit = {
-    metadata
-      .comment
-      .map("COMMENT '" + escapeSingleQuotedString(_) + "'\n")
-      .foreach(builder.append)
-  }
-
-  private def showTableProperties(metadata: CatalogTable, builder: StringBuilder): Unit = {
+  private def showHiveTableProperties(metadata: CatalogTable, builder: StringBuilder): Unit = {
     if (metadata.properties.nonEmpty) {
       val props = metadata.properties.map { case (key, value) =>
         s"'${escapeSingleQuotedString(key)}' = '${escapeSingleQuotedString(value)}'"
@@ -1083,9 +1112,6 @@ case class ShowCreateTableCommand(table: TableIdentifier) extends RunnableComman
     showDataSourceTableDataColumns(metadata, builder)
     showDataSourceTableOptions(metadata, builder)
     showDataSourceTableNonDataColumns(metadata, builder)
-    showTableComment(metadata, builder)
-    showTableLocation(metadata, builder)
-    showTableProperties(metadata, builder)
 
     builder.toString()
   }
@@ -1099,8 +1125,16 @@ case class ShowCreateTableCommand(table: TableIdentifier) extends RunnableComman
   private def showDataSourceTableOptions(metadata: CatalogTable, builder: StringBuilder): Unit = {
     builder ++= s"USING ${metadata.provider.get}\n"
 
-    val dataSourceOptions = metadata.storage.properties.map {
+    val dataSourceOptions = SQLConf.get.redactOptions(metadata.storage.properties).map {
       case (key, value) => s"${quoteIdentifier(key)} '${escapeSingleQuotedString(value)}'"
+    } ++ metadata.storage.locationUri.flatMap { location =>
+      if (metadata.tableType == MANAGED) {
+        // If it's a managed table, omit PATH option. Spark SQL always creates external table
+        // when the table creation DDL contains the PATH option.
+        None
+      } else {
+        Some(s"path '${escapeSingleQuotedString(CatalogUtils.URIToString(location))}'")
+      }
     }
 
     if (dataSourceOptions.nonEmpty) {

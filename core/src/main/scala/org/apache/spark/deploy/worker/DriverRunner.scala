@@ -31,7 +31,6 @@ import org.apache.spark.deploy.DeployMessages.DriverStateChanged
 import org.apache.spark.deploy.master.DriverState
 import org.apache.spark.deploy.master.DriverState.DriverState
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.Worker.WORKER_DRIVER_TERMINATE_TIMEOUT
 import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.util.{Clock, ShutdownHookManager, SystemClock, Utils}
 
@@ -58,7 +57,8 @@ private[deploy] class DriverRunner(
   @volatile private[worker] var finalException: Option[Exception] = None
 
   // Timeout to wait for when trying to terminate a driver.
-  private val driverTerminateTimeoutMs = conf.get(WORKER_DRIVER_TERMINATE_TIMEOUT)
+  private val DRIVER_TERMINATE_TIMEOUT_MS =
+    conf.getTimeAsMs("spark.worker.driverTerminateTimeout", "10s")
 
   // Decoupled for testing
   def setClock(_clock: Clock): Unit = {
@@ -122,7 +122,7 @@ private[deploy] class DriverRunner(
     killed = true
     synchronized {
       process.foreach { p =>
-        val exitCode = Utils.terminateProcess(p, driverTerminateTimeoutMs)
+        val exitCode = Utils.terminateProcess(p, DRIVER_TERMINATE_TIMEOUT_MS)
         if (exitCode.isEmpty) {
           logWarning("Failed to terminate driver process: " + p +
               ". This process will likely be orphaned.")
@@ -193,9 +193,8 @@ private[deploy] class DriverRunner(
       CommandUtils.redirectStream(process.getInputStream, stdout)
 
       val stderr = new File(baseDir, "stderr")
-      val redactedCommand = Utils.redactCommandLineArgs(conf, builder.command.asScala)
-        .mkString("\"", "\" \"", "\"")
-      val header = "Launch Command: %s\n%s\n\n".format(redactedCommand, "=" * 40)
+      val formattedCommand = builder.command.asScala.mkString("\"", "\" \"", "\"")
+      val header = "Launch Command: %s\n%s\n\n".format(formattedCommand, "=" * 40)
       Files.append(header, stderr, StandardCharsets.UTF_8)
       CommandUtils.redirectStream(process.getErrorStream, stderr)
     }
@@ -211,10 +210,8 @@ private[deploy] class DriverRunner(
     val successfulRunDuration = 5
     var keepTrying = !killed
 
-    val redactedCommand = Utils.redactCommandLineArgs(conf, command.command)
-      .mkString("\"", "\" \"", "\"")
     while (keepTrying) {
-      logInfo("Launch Command: " + redactedCommand)
+      logInfo("Launch Command: " + command.command.mkString("\"", "\" \"", "\""))
 
       synchronized {
         if (killed) { return exitCode }

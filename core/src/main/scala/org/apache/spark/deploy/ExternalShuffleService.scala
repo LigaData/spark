@@ -23,7 +23,7 @@ import scala.collection.JavaConverters._
 
 import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.internal.{config, Logging}
-import org.apache.spark.metrics.{MetricsSystem, MetricsSystemInstances}
+import org.apache.spark.metrics.MetricsSystem
 import org.apache.spark.network.TransportContext
 import org.apache.spark.network.crypto.AuthServerBootstrap
 import org.apache.spark.network.netty.SparkTransportConf
@@ -43,8 +43,7 @@ private[deploy]
 class ExternalShuffleService(sparkConf: SparkConf, securityManager: SecurityManager)
   extends Logging {
   protected val masterMetricsSystem =
-    MetricsSystem.createMetricsSystem(MetricsSystemInstances.SHUFFLE_SERVICE,
-      sparkConf, securityManager)
+    MetricsSystem.createMetricsSystem("shuffleService", sparkConf, securityManager)
 
   private val enabled = sparkConf.get(config.SHUFFLE_SERVICE_ENABLED)
   private val port = sparkConf.get(config.SHUFFLE_SERVICE_PORT)
@@ -52,7 +51,8 @@ class ExternalShuffleService(sparkConf: SparkConf, securityManager: SecurityMana
   private val transportConf =
     SparkTransportConf.fromSparkConf(sparkConf, "shuffle", numUsableCores = 0)
   private val blockHandler = newShuffleBlockHandler(transportConf)
-  private var transportContext: TransportContext = _
+  private val transportContext: TransportContext =
+    new TransportContext(transportConf, blockHandler, true)
 
   private var server: TransportServer = _
 
@@ -81,12 +81,9 @@ class ExternalShuffleService(sparkConf: SparkConf, securityManager: SecurityMana
       } else {
         Nil
       }
-    transportContext = new TransportContext(transportConf, blockHandler, true)
     server = transportContext.createServer(port, bootstraps.asJava)
 
     shuffleServiceSource.registerMetricSet(server.getAllMetrics)
-    blockHandler.getAllMetrics.getMetrics.put("numRegisteredConnections",
-        server.getRegisteredConnections)
     shuffleServiceSource.registerMetricSet(blockHandler.getAllMetrics)
     masterMetricsSystem.registerSource(shuffleServiceSource)
     masterMetricsSystem.start()
@@ -106,10 +103,6 @@ class ExternalShuffleService(sparkConf: SparkConf, securityManager: SecurityMana
     if (server != null) {
       server.close()
       server = null
-    }
-    if (transportContext != null) {
-      transportContext.close()
-      transportContext = null
     }
   }
 }

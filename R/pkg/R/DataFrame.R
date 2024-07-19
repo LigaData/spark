@@ -226,9 +226,7 @@ setMethod("showDF",
 
 #' show
 #'
-#' If eager evaluation is enabled and the Spark object is a SparkDataFrame, evaluate the
-#' SparkDataFrame and print top rows of the SparkDataFrame, otherwise, print the class
-#' and type information of the Spark object.
+#' Print class and type information of a Spark object.
 #'
 #' @param object a Spark object. Can be a SparkDataFrame, Column, GroupedData, WindowSpec.
 #'
@@ -246,33 +244,11 @@ setMethod("showDF",
 #' @note show(SparkDataFrame) since 1.4.0
 setMethod("show", "SparkDataFrame",
           function(object) {
-            allConf <- sparkR.conf()
-            prop <- allConf[["spark.sql.repl.eagerEval.enabled"]]
-            if (!is.null(prop) && identical(prop, "true")) {
-              argsList <- list()
-              argsList$x <- object
-              prop <- allConf[["spark.sql.repl.eagerEval.maxNumRows"]]
-              if (!is.null(prop)) {
-                numRows <- as.integer(prop)
-                if (numRows > 0) {
-                  argsList$numRows <- numRows
-                }
-              }
-              prop <- allConf[["spark.sql.repl.eagerEval.truncate"]]
-              if (!is.null(prop)) {
-                truncate <- as.integer(prop)
-                if (truncate > 0) {
-                  argsList$truncate <- truncate
-                }
-              }
-              do.call(showDF, argsList)
-            } else {
-              cols <- lapply(dtypes(object), function(l) {
-                paste(l, collapse = ":")
-              })
-              s <- paste(cols, collapse = ", ")
-              cat(paste(class(object), "[", s, "]\n", sep = ""))
-            }
+            cols <- lapply(dtypes(object), function(l) {
+              paste(l, collapse = ":")
+            })
+            s <- paste(cols, collapse = ", ")
+            cat(paste(class(object), "[", s, "]\n", sep = ""))
           })
 
 #' DataTypes
@@ -521,6 +497,32 @@ setMethod("createOrReplaceTempView",
               invisible(callJMethod(x@sdf, "createOrReplaceTempView", viewName))
           })
 
+#' (Deprecated) Register Temporary Table
+#'
+#' Registers a SparkDataFrame as a Temporary Table in the SparkSession
+#' @param x A SparkDataFrame
+#' @param tableName A character vector containing the name of the table
+#'
+#' @seealso \link{createOrReplaceTempView}
+#' @rdname registerTempTable-deprecated
+#' @name registerTempTable
+#' @aliases registerTempTable,SparkDataFrame,character-method
+#' @examples
+#'\dontrun{
+#' sparkR.session()
+#' path <- "path/to/file.json"
+#' df <- read.json(path)
+#' registerTempTable(df, "json_df")
+#' new_df <- sql("SELECT * FROM json_df")
+#'}
+#' @note registerTempTable since 1.4.0
+setMethod("registerTempTable",
+          signature(x = "SparkDataFrame", tableName = "character"),
+          function(x, tableName) {
+              .Deprecated("createOrReplaceTempView")
+              invisible(callJMethod(x@sdf, "createOrReplaceTempView", tableName))
+          })
+
 #' insertInto
 #'
 #' Insert the contents of a SparkDataFrame into a table registered in the current SparkSession.
@@ -766,13 +768,6 @@ setMethod("repartition",
 #'  \item{2.} {Return a new SparkDataFrame range partitioned by the given column(s),
 #'                      using \code{spark.sql.shuffle.partitions} as number of partitions.}
 #'}
-#' At least one partition-by expression must be specified.
-#' When no explicit sort order is specified, "ascending nulls first" is assumed.
-#'
-#' Note that due to performance reasons this method uses sampling to estimate the ranges.
-#' Hence, the output may not be consistent, since sampling can return different values.
-#' The sample size can be controlled by the config
-#' \code{spark.sql.execution.rangeExchange.sampleSizePerPartition}.
 #'
 #' @param x a SparkDataFrame.
 #' @param numPartitions the number of partitions to use.
@@ -827,6 +822,7 @@ setMethod("repartitionByRange",
 #' toJSON
 #'
 #' Converts a SparkDataFrame into a SparkDataFrame of JSON string.
+#'
 #' Each row is turned into a JSON document with columns as different fields.
 #' The returned SparkDataFrame has a single character column with the name \code{value}
 #'
@@ -936,6 +932,7 @@ setMethod("write.orc",
 #' path <- "path/to/file.json"
 #' df <- read.json(path)
 #' write.parquet(df, "/tmp/sparkr-tmp1/")
+#' saveAsParquetFile(df, "/tmp/sparkr-tmp2/")
 #'}
 #' @note write.parquet since 1.6.0
 setMethod("write.parquet",
@@ -946,11 +943,22 @@ setMethod("write.parquet",
             invisible(handledCallJMethod(write, "parquet", path))
           })
 
+#' @rdname write.parquet
+#' @name saveAsParquetFile
+#' @aliases saveAsParquetFile,SparkDataFrame,character-method
+#' @note saveAsParquetFile since 1.4.0
+setMethod("saveAsParquetFile",
+          signature(x = "SparkDataFrame", path = "character"),
+          function(x, path) {
+            .Deprecated("write.parquet")
+            write.parquet(x, path)
+          })
+
 #' Save the content of SparkDataFrame in a text file at the specified path.
 #'
 #' Save the content of the SparkDataFrame in a text file at the specified path.
 #' The SparkDataFrame must have only one column of string type with the name "value".
-#' Each row becomes a new line in the output file. The text files will be encoded as UTF-8.
+#' Each row becomes a new line in the output file.
 #'
 #' @param x A SparkDataFrame
 #' @param path The directory where the file is saved
@@ -1177,50 +1185,11 @@ setMethod("dim",
 setMethod("collect",
           signature(x = "SparkDataFrame"),
           function(x, stringsAsFactors = FALSE) {
-            connectionTimeout <- as.numeric(Sys.getenv("SPARKR_BACKEND_CONNECTION_TIMEOUT", "6000"))
-            useArrow <- FALSE
-            arrowEnabled <- sparkR.conf("spark.sql.execution.arrow.enabled")[[1]] == "true"
-            if (arrowEnabled) {
-              useArrow <- tryCatch({
-                checkSchemaInArrow(schema(x))
-                TRUE
-              }, error = function(e) {
-                warning(paste0("The conversion from Spark DataFrame to R DataFrame was attempted ",
-                               "with Arrow optimization because ",
-                               "'spark.sql.execution.arrow.enabled' is set to true; however, ",
-                               "failed, attempting non-optimization. Reason: ",
-                               e))
-                FALSE
-              })
-            }
-
             dtypes <- dtypes(x)
             ncol <- length(dtypes)
             if (ncol <= 0) {
               # empty data.frame with 0 columns and 0 rows
               data.frame()
-            } else if (useArrow) {
-              requireNamespace1 <- requireNamespace
-              if (requireNamespace1("arrow", quietly = TRUE)) {
-                read_arrow <- get("read_arrow", envir = asNamespace("arrow"), inherits = FALSE)
-                as_tibble <- get("as_tibble", envir = asNamespace("arrow"))
-
-                portAuth <- callJMethod(x@sdf, "collectAsArrowToR")
-                port <- portAuth[[1]]
-                authSecret <- portAuth[[2]]
-                conn <- socketConnection(
-                  port = port, blocking = TRUE, open = "wb", timeout = connectionTimeout)
-                output <- tryCatch({
-                  doServerAuth(conn, authSecret)
-                  arrowTable <- read_arrow(readRaw(conn))
-                  as.data.frame(as_tibble(arrowTable), stringsAsFactors = stringsAsFactors)
-                }, finally = {
-                  close(conn)
-                })
-                return(output)
-              } else {
-                stop("'arrow' package should be installed.")
-              }
             } else {
               # listCols is a list of columns
               listCols <- callJStatic("org.apache.spark.sql.api.r.SQLUtils", "dfToCols", x@sdf)
@@ -1476,18 +1445,6 @@ dapplyInternal <- function(x, func, schema) {
     schema <- structType(schema)
   }
 
-  arrowEnabled <- sparkR.conf("spark.sql.execution.arrow.enabled")[[1]] == "true"
-  if (arrowEnabled) {
-    if (inherits(schema, "structType")) {
-      checkSchemaInArrow(schema)
-    } else if (is.null(schema)) {
-      stop(paste0("Arrow optimization does not support 'dapplyCollect' yet. Please disable ",
-                  "Arrow optimization or use 'collect' and 'dapply' APIs instead."))
-    } else {
-      stop("'schema' should be DDL-formatted string or structType.")
-    }
-  }
-
   packageNamesArr <- serialize(.sparkREnv[[".packages"]],
                                connection = NULL)
 
@@ -1625,9 +1582,7 @@ setMethod("dapplyCollect",
 #'
 #' @param cols grouping columns.
 #' @param func a function to be applied to each group partition specified by grouping
-#'             column of the SparkDataFrame. The function \code{func} takes as argument
-#'             a key - grouping columns and a data frame - a local R data.frame.
-#'             The output of \code{func} is a local R data.frame.
+#'             column of the SparkDataFrame. See Details.
 #' @param schema the schema of the resulting SparkDataFrame after the function is applied.
 #'               The schema must match to output of \code{func}. It has to be defined for each
 #'               output column with preferred output column name and corresponding data type.
@@ -1637,29 +1592,43 @@ setMethod("dapplyCollect",
 #' @aliases gapply,SparkDataFrame-method
 #' @rdname gapply
 #' @name gapply
+#' @details
+#' \code{func} is a function of two arguments. The first, usually named \code{key}
+#' (though this is not enforced) corresponds to the grouping key, will be an
+#' unnamed \code{list} of \code{length(cols)} length-one objects corresponding
+#' to the grouping columns' values for the current group.
+#'
+#' The second, herein \code{x}, will be a local \code{\link{data.frame}} with the
+#' columns of the input not in \code{cols} for the rows corresponding to \code{key}.
+#'
+#' The output of \code{func} must be a \code{data.frame} matching \code{schema} --
+#' in particular this means the names of the output \code{data.frame} are irrelevant
+#'
 #' @seealso \link{gapplyCollect}
 #' @examples
 #'
 #' \dontrun{
-#' Computes the arithmetic mean of the second column by grouping
-#' on the first and third columns. Output the grouping values and the average.
+#' # Computes the arithmetic mean of the second column by grouping
+#' # on the first and third columns. Output the grouping values and the average.
 #'
 #' df <- createDataFrame (
 #' list(list(1L, 1, "1", 0.1), list(1L, 2, "1", 0.2), list(3L, 3, "3", 0.3)),
 #'   c("a", "b", "c", "d"))
 #'
-#' Here our output contains three columns, the key which is a combination of two
-#' columns with data types integer and string and the mean which is a double.
+#' # Here our output contains three columns, the key which is a combination of two
+#' # columns with data types integer and string and the mean which is a double.
 #' schema <- structType(structField("a", "integer"), structField("c", "string"),
 #'   structField("avg", "double"))
 #' result <- gapply(
 #'   df,
 #'   c("a", "c"),
 #'   function(key, x) {
+#'     # key will either be list(1L, '1') (for the group where a=1L,c='1') or
+#'     #   list(3L, '3') (for the group where a=3L,c='3')
 #'     y <- data.frame(key, mean(x$b), stringsAsFactors = FALSE)
 #' }, schema)
 #'
-#' The schema also can be specified in a DDL-formatted string.
+#' # The schema also can be specified in a DDL-formatted string.
 #' schema <- "a INT, c STRING, avg DOUBLE"
 #' result <- gapply(
 #'   df,
@@ -1668,8 +1637,8 @@ setMethod("dapplyCollect",
 #'     y <- data.frame(key, mean(x$b), stringsAsFactors = FALSE)
 #' }, schema)
 #'
-#' We can also group the data and afterwards call gapply on GroupedData.
-#' For Example:
+#' # We can also group the data and afterwards call gapply on GroupedData.
+#' # For example:
 #' gdf <- group_by(df, "a", "c")
 #' result <- gapply(
 #'   gdf,
@@ -1678,15 +1647,15 @@ setMethod("dapplyCollect",
 #' }, schema)
 #' collect(result)
 #'
-#' Result
-#' ------
-#' a c avg
-#' 3 3 3.0
-#' 1 1 1.5
+#' # Result
+#' # ------
+#' # a c avg
+#' # 3 3 3.0
+#' # 1 1 1.5
 #'
-#' Fits linear models on iris dataset by grouping on the 'Species' column and
-#' using 'Sepal_Length' as a target variable, 'Sepal_Width', 'Petal_Length'
-#' and 'Petal_Width' as training features.
+#' # Fits linear models on iris dataset by grouping on the 'Species' column and
+#' # using 'Sepal_Length' as a target variable, 'Sepal_Width', 'Petal_Length'
+#' # and 'Petal_Width' as training features.
 #'
 #' df <- createDataFrame (iris)
 #' schema <- structType(structField("(Intercept)", "double"),
@@ -1702,12 +1671,12 @@ setMethod("dapplyCollect",
 #'   }, schema)
 #' collect(df1)
 #'
-#' Result
-#' ---------
-#' Model  (Intercept)  Sepal_Width  Petal_Length  Petal_Width
-#' 1        0.699883    0.3303370    0.9455356    -0.1697527
-#' 2        1.895540    0.3868576    0.9083370    -0.6792238
-#' 3        2.351890    0.6548350    0.2375602     0.2521257
+#' # Result
+#' # ---------
+#' # Model  (Intercept)  Sepal_Width  Petal_Length  Petal_Width
+#' # 1        0.699883    0.3303370    0.9455356    -0.1697527
+#' # 2        1.895540    0.3868576    0.9083370    -0.6792238
+#' # 3        2.351890    0.6548350    0.2375602     0.2521257
 #'
 #'}
 #' @note gapply(SparkDataFrame) since 2.0.0
@@ -1725,20 +1694,30 @@ setMethod("gapply",
 #'
 #' @param cols grouping columns.
 #' @param func a function to be applied to each group partition specified by grouping
-#'             column of the SparkDataFrame. The function \code{func} takes as argument
-#'             a key - grouping columns and a data frame - a local R data.frame.
-#'             The output of \code{func} is a local R data.frame.
+#'             column of the SparkDataFrame. See Details.
 #' @return A data.frame.
 #' @family SparkDataFrame functions
 #' @aliases gapplyCollect,SparkDataFrame-method
 #' @rdname gapplyCollect
 #' @name gapplyCollect
+#' @details
+#' \code{func} is a function of two arguments. The first, usually named \code{key}
+#' (though this is not enforced) corresponds to the grouping key, will be an
+#' unnamed \code{list} of \code{length(cols)} length-one objects corresponding
+#' to the grouping columns' values for the current group.
+#'
+#' The second, herein \code{x}, will be a local \code{\link{data.frame}} with the
+#' columns of the input not in \code{cols} for the rows corresponding to \code{key}.
+#'
+#' The output of \code{func} must be a \code{data.frame} matching \code{schema} --
+#' in particular this means the names of the output \code{data.frame} are irrelevant
+#'
 #' @seealso \link{gapply}
 #' @examples
 #'
 #' \dontrun{
-#' Computes the arithmetic mean of the second column by grouping
-#' on the first and third columns. Output the grouping values and the average.
+#' # Computes the arithmetic mean of the second column by grouping
+#' # on the first and third columns. Output the grouping values and the average.
 #'
 #' df <- createDataFrame (
 #' list(list(1L, 1, "1", 0.1), list(1L, 2, "1", 0.2), list(3L, 3, "3", 0.3)),
@@ -1753,8 +1732,8 @@ setMethod("gapply",
 #'     y
 #'   })
 #'
-#' We can also group the data and afterwards call gapply on GroupedData.
-#' For Example:
+#' # We can also group the data and afterwards call gapply on GroupedData.
+#' # For example:
 #' gdf <- group_by(df, "a", "c")
 #' result <- gapplyCollect(
 #'   gdf,
@@ -1764,15 +1743,15 @@ setMethod("gapply",
 #'     y
 #'   })
 #'
-#' Result
-#' ------
-#' key_a key_c mean_b
-#' 3 3 3.0
-#' 1 1 1.5
+#' # Result
+#' # ------
+#' # key_a key_c mean_b
+#' # 3 3 3.0
+#' # 1 1 1.5
 #'
-#' Fits linear models on iris dataset by grouping on the 'Species' column and
-#' using 'Sepal_Length' as a target variable, 'Sepal_Width', 'Petal_Length'
-#' and 'Petal_Width' as training features.
+#' # Fits linear models on iris dataset by grouping on the 'Species' column and
+#' # using 'Sepal_Length' as a target variable, 'Sepal_Width', 'Petal_Length'
+#' # and 'Petal_Width' as training features.
 #'
 #' df <- createDataFrame (iris)
 #' result <- gapplyCollect(
@@ -1784,12 +1763,12 @@ setMethod("gapply",
 #'     data.frame(t(coef(m)))
 #'   })
 #'
-#' Result
-#'---------
-#' Model  X.Intercept.  Sepal_Width  Petal_Length  Petal_Width
-#' 1        0.699883    0.3303370    0.9455356    -0.1697527
-#' 2        1.895540    0.3868576    0.9083370    -0.6792238
-#' 3        2.351890    0.6548350    0.2375602     0.2521257
+#' # Result
+#' # ---------
+#' # Model  X.Intercept.  Sepal_Width  Petal_Length  Petal_Width
+#' # 1        0.699883    0.3303370    0.9455356    -0.1697527
+#' # 2        1.895540    0.3868576    0.9083370    -0.6792238
+#' # 3        2.351890    0.6548350    0.2375602     0.2521257
 #'
 #'}
 #' @note gapplyCollect(SparkDataFrame) since 2.0.0
@@ -2241,7 +2220,7 @@ setMethod("mutate",
 
             # The last column of the same name in the specific columns takes effect
             deDupCols <- list()
-            for (i in 1:length(cols)) {
+            for (i in seq_len(length(cols))) {
               deDupCols[[ns[[i]]]] <- alias(cols[[i]], ns[[i]])
             }
 
@@ -2405,7 +2384,7 @@ setMethod("arrange",
             # builds a list of columns of type Column
             # example: [[1]] Column Species ASC
             #          [[2]] Column Petal_Length DESC
-            jcols <- lapply(seq_len(length(decreasing)), function(i){
+            jcols <- lapply(seq_len(length(decreasing)), function(i) {
               if (decreasing[[i]]) {
                 desc(getColumn(x, by[[i]]))
               } else {
@@ -2520,9 +2499,8 @@ setMethod("dropDuplicates",
 #' Column expression. If joinExpr is omitted, the default, inner join is attempted and an error is
 #' thrown if it would be a Cartesian Product. For Cartesian join, use crossJoin instead.
 #' @param joinType The type of join to perform, default 'inner'.
-#' Must be one of: 'inner', 'cross', 'outer', 'full', 'fullouter', 'full_outer',
-#' 'left', 'leftouter', 'left_outer', 'right', 'rightouter', 'right_outer', 'semi',
-#' 'leftsemi', 'left_semi', 'anti', 'leftanti', 'left_anti'.
+#' Must be one of: 'inner', 'cross', 'outer', 'full', 'full_outer',
+#' 'left', 'left_outer', 'right', 'right_outer', 'left_semi', or 'left_anti'.
 #' @return A SparkDataFrame containing the result of the join operation.
 #' @family SparkDataFrame functions
 #' @aliases join,SparkDataFrame,SparkDataFrame-method
@@ -2554,14 +2532,14 @@ setMethod("join",
                     "outer", "full", "fullouter", "full_outer",
                     "left", "leftouter", "left_outer",
                     "right", "rightouter", "right_outer",
-                    "semi", "left_semi", "leftsemi", "anti", "left_anti", "leftanti")) {
+                    "left_semi", "leftsemi", "left_anti", "leftanti")) {
                   joinType <- gsub("_", "", joinType)
                   sdf <- callJMethod(x@sdf, "join", y@sdf, joinExpr@jc, joinType)
                 } else {
-                  stop(paste("joinType must be one of the following types:",
-                       "'inner', 'cross', 'outer', 'full', 'fullouter', 'full_outer',",
-                       "'left', 'leftouter', 'left_outer', 'right', 'rightouter', 'right_outer',",
-                       "'semi', 'leftsemi', 'left_semi', 'anti', 'leftanti' or 'left_anti'."))
+                  stop("joinType must be one of the following types: ",
+                       "'inner', 'cross', 'outer', 'full', 'full_outer',",
+                       "'left', 'left_outer', 'right', 'right_outer',",
+                       "'left_semi', or 'left_anti'.")
                 }
               }
             }
@@ -2738,7 +2716,7 @@ genAliasesForIntersectedCols <- function(x, intersectedColNames, suffix) {
     col <- getColumn(x, colName)
     if (colName %in% intersectedColNames) {
       newJoin <- paste(colName, suffix, sep = "")
-      if (newJoin %in% allColNames){
+      if (newJoin %in% allColNames) {
         stop("The following column name: ", newJoin, " occurs more than once in the 'DataFrame'.",
           "Please use different suffixes for the intersected columns.")
       }
@@ -2782,29 +2760,15 @@ setMethod("union",
             dataFrame(unioned)
           })
 
-#' Return a new SparkDataFrame containing the union of rows.
-#'
-#' This is an alias for \code{union}.
-#'
-#' @param x a SparkDataFrame.
-#' @param y a SparkDataFrame.
-#' @return A SparkDataFrame containing the result of the unionAll operation.
-#' @family SparkDataFrame functions
-#' @aliases unionAll,SparkDataFrame,SparkDataFrame-method
-#' @rdname unionAll
+#' unionAll is deprecated - use union instead
+#' @rdname union
 #' @name unionAll
-#' @seealso \link{union}
-#' @examples
-#'\dontrun{
-#' sparkR.session()
-#' df1 <- read.json(path)
-#' df2 <- read.json(path2)
-#' unionAllDF <- unionAll(df1, df2)
-#' }
+#' @aliases unionAll,SparkDataFrame,SparkDataFrame-method
 #' @note unionAll since 1.4.0
 setMethod("unionAll",
           signature(x = "SparkDataFrame", y = "SparkDataFrame"),
           function(x, y) {
+            .Deprecated("union")
             union(x, y)
           })
 
@@ -3012,9 +2976,6 @@ setMethod("exceptAll",
 #' @param source a name for external data source.
 #' @param mode one of 'append', 'overwrite', 'error', 'errorifexists', 'ignore'
 #'             save mode (it is 'error' by default)
-#' @param partitionBy a name or a list of names of columns to partition the output by on the file
-#'                    system. If specified, the output is laid out on the file system similar
-#'                    to Hive's partitioning scheme.
 #' @param ... additional argument(s) passed to the method.
 #'
 #' @family SparkDataFrame functions
@@ -3026,13 +2987,13 @@ setMethod("exceptAll",
 #' sparkR.session()
 #' path <- "path/to/file.json"
 #' df <- read.json(path)
-#' write.df(df, "myfile", "parquet", "overwrite", partitionBy = c("col1", "col2"))
+#' write.df(df, "myfile", "parquet", "overwrite")
 #' saveDF(df, parquetPath2, "parquet", mode = "append", mergeSchema = TRUE)
 #' }
 #' @note write.df since 1.4.0
 setMethod("write.df",
           signature(df = "SparkDataFrame"),
-          function(df, path = NULL, source = NULL, mode = "error", partitionBy = NULL, ...) {
+          function(df, path = NULL, source = NULL, mode = "error", ...) {
             if (!is.null(path) && !is.character(path)) {
               stop("path should be character, NULL or omitted.")
             }
@@ -3046,18 +3007,8 @@ setMethod("write.df",
             if (is.null(source)) {
               source <- getDefaultSqlSource()
             }
-            cols <- NULL
-            if (!is.null(partitionBy)) {
-              if (!all(sapply(partitionBy, function(c) is.character(c)))) {
-                stop("All partitionBy column names should be characters.")
-              }
-              cols <- as.list(partitionBy)
-            }
             write <- callJMethod(df@sdf, "write")
             write <- callJMethod(write, "format", source)
-            if (!is.null(cols)) {
-              write <- callJMethod(write, "partitionBy", cols)
-            }
             write <- setWriteOptions(write, path = path, mode = mode, ...)
             write <- handledCallJMethod(write, "save")
           })
@@ -3464,7 +3415,7 @@ setMethod("str",
             cat(paste0("'", class(object), "': ", length(names), " variables:\n"))
 
             if (nrow(localDF) > 0) {
-              for (i in 1 : ncol(localDF)) {
+              for (i in seq_len(ncol(localDF))) {
                 # Get the first elements for each column
 
                 firstElements <- if (types[i] == "character") {
@@ -4056,17 +4007,7 @@ setMethod("hint",
           signature(x = "SparkDataFrame", name = "character"),
           function(x, name, ...) {
             parameters <- list(...)
-            if (!all(sapply(parameters, function(y) {
-              if (is.character(y) || is.numeric(y)) {
-                TRUE
-              } else if (is.list(y)) {
-                all(sapply(y, function(z) { is.character(z) || is.numeric(z) }))
-              } else {
-                FALSE
-              }
-            }))) {
-              stop("sql hint should be character, numeric, or list with character or numeric.")
-            }
+            stopifnot(all(sapply(parameters, is.character)))
             jdf <- callJMethod(x@sdf, "hint", name, parameters)
             dataFrame(jdf)
           })

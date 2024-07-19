@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import org.apache.spark.SparkContext
 import org.apache.spark.scheduler.{SparkListener, SparkListenerTaskEnd, SparkListenerTaskStart}
-import org.apache.spark.sql.execution.datasources.v2.ContinuousScanExec
+import org.apache.spark.sql.execution.datasources.v2.StreamingDataSourceV2Relation
 import org.apache.spark.sql.execution.streaming.StreamExecution
 import org.apache.spark.sql.execution.streaming.continuous.ContinuousExecution
 import org.apache.spark.sql.streaming.Trigger
@@ -46,17 +46,15 @@ trait KafkaContinuousTest extends KafkaSourceTest {
     testUtils.addPartitions(topic, newCount)
     eventually(timeout(streamingTimeout)) {
       assert(
-        query.lastExecution.executedPlan.collectFirst {
-          case scan: ContinuousScanExec
-              if scan.stream.isInstanceOf[KafkaContinuousStream] =>
-            scan.stream.asInstanceOf[KafkaContinuousStream]
+        query.lastExecution.logical.collectFirst {
+          case StreamingDataSourceV2Relation(_, _, _, r: KafkaContinuousReader) => r
         }.exists(_.knownPartitions.size == newCount),
         s"query never reconfigured to $newCount partitions")
     }
   }
 
   // Continuous processing tasks end asynchronously, so test that they actually end.
-  private class TasksEndedListener extends SparkListener {
+  private val tasksEndedListener = new SparkListener() {
     val activeTaskIdCount = new AtomicInteger(0)
 
     override def onTaskStart(start: SparkListenerTaskStart): Unit = {
@@ -67,8 +65,6 @@ trait KafkaContinuousTest extends KafkaSourceTest {
       activeTaskIdCount.decrementAndGet()
     }
   }
-
-  private val tasksEndedListener = new TasksEndedListener()
 
   override def beforeEach(): Unit = {
     super.beforeEach()

@@ -61,6 +61,7 @@ project/plugins/project/build.properties
 project/plugins/src_managed/
 project/plugins/target/
 python/lib/pyspark.zip
+python/.eggs/
 python/deps
 python/test_coverage/coverage_data
 python/test_coverage/htmlcov
@@ -77,6 +78,7 @@ target/
 unit-tests.log
 work/
 docs/.jekyll-metadata
+*.crc
 
 # For Hive
 TempStatsStore/
@@ -94,6 +96,3 @@ spark-warehouse/
 *.Rproj.*
 
 .Rproj.user
-
-# For SBT
-.jvmopts

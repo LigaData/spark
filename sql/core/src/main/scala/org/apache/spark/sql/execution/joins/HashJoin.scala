@@ -17,9 +17,9 @@
 
 package org.apache.spark.sql.execution.joins
 
+import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.expressions.BindReferences.bindReferences
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{RowIterator, SparkPlan}
@@ -62,10 +62,14 @@ trait HashJoin {
   }
 
   protected lazy val (buildKeys, streamedKeys) = {
-    require(leftKeys.map(_.dataType) == rightKeys.map(_.dataType),
-      "Join keys from two sides should have same types")
-    val lkeys = bindReferences(HashJoin.rewriteKeyExpr(leftKeys), left.output)
-    val rkeys = bindReferences(HashJoin.rewriteKeyExpr(rightKeys), right.output)
+    require(leftKeys.length == rightKeys.length &&
+      leftKeys.map(_.dataType)
+        .zip(rightKeys.map(_.dataType))
+        .forall(types => types._1.sameType(types._2)),
+      "Join keys from two sides should have same length and types")
+    val lkeys = HashJoin.rewriteKeyExpr(leftKeys).map(BindReferences.bindReference(_, left.output))
+    val rkeys = HashJoin.rewriteKeyExpr(rightKeys)
+      .map(BindReferences.bindReference(_, right.output))
     buildSide match {
       case BuildLeft => (lkeys, rkeys)
       case BuildRight => (rkeys, lkeys)

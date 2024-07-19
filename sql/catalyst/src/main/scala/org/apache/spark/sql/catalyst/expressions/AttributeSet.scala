@@ -17,8 +17,6 @@
 
 package org.apache.spark.sql.catalyst.expressions
 
-import scala.collection.mutable
-
 
 protected class AttributeEquals(val a: Attribute) {
   override def hashCode(): Int = a match {
@@ -41,13 +39,10 @@ object AttributeSet {
 
   /** Constructs a new [[AttributeSet]] given a sequence of [[Expression Expressions]]. */
   def apply(baseSet: Iterable[Expression]): AttributeSet = {
-    fromAttributeSets(baseSet.map(_.references))
-  }
-
-  /** Constructs a new [[AttributeSet]] given a sequence of [[AttributeSet]]s. */
-  def fromAttributeSets(sets: Iterable[AttributeSet]): AttributeSet = {
-    val baseSet = sets.foldLeft(new mutable.LinkedHashSet[AttributeEquals]())( _ ++= _.baseSet)
-    new AttributeSet(baseSet.toSet)
+    new AttributeSet(
+      baseSet
+        .flatMap(_.references)
+        .map(new AttributeEquals(_)).toSet)
   }
 }
 
@@ -99,14 +94,8 @@ class AttributeSet private (val baseSet: Set[AttributeEquals])
    * Returns a new [[AttributeSet]] that does not contain any of the [[Attribute Attributes]] found
    * in `other`.
    */
-  def --(other: Traversable[NamedExpression]): AttributeSet = {
-    other match {
-      case otherSet: AttributeSet =>
-        new AttributeSet(baseSet -- otherSet.baseSet)
-      case _ =>
-        new AttributeSet(baseSet -- other.map(a => new AttributeEquals(a.toAttribute)))
-    }
-  }
+  def --(other: Traversable[NamedExpression]): AttributeSet =
+    new AttributeSet(baseSet -- other.map(a => new AttributeEquals(a.toAttribute)))
 
   /**
    * Returns a new [[AttributeSet]] that contains all of the [[Attribute Attributes]] found

@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+table.dataTable thead .sorting { background: url('images/sort_both.png') no-repeat bottom right; }
+
 table.dataTable thead .sorting_asc { background: url('images/sort_asc.png') no-repeat bottom right; }
 
 table.dataTable thead .sorting_desc { background: url('images/sort_desc.png') no-repeat bottom right; }

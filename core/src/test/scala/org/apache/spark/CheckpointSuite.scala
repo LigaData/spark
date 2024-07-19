@@ -24,7 +24,6 @@ import scala.reflect.ClassTag
 import com.google.common.io.ByteStreams
 import org.apache.hadoop.fs.Path
 
-import org.apache.spark.internal.config.UI._
 import org.apache.spark.io.CompressionCodec
 import org.apache.spark.rdd._
 import org.apache.spark.storage.{BlockId, StorageLevel, TestBlockId}
@@ -511,8 +510,8 @@ class CheckpointSuite extends SparkFunSuite with RDDCheckpointTester with LocalS
     assert(rdd.isCheckpointed === false)
     assert(rdd.isCheckpointedAndMaterialized === false)
     assert(rdd.count() === 0)
-    assert(rdd.isCheckpointed)
-    assert(rdd.isCheckpointedAndMaterialized)
+    assert(rdd.isCheckpointed === true)
+    assert(rdd.isCheckpointedAndMaterialized === true)
     assert(rdd.partitions.size === 0)
   }
 
@@ -531,7 +530,7 @@ class CheckpointSuite extends SparkFunSuite with RDDCheckpointTester with LocalS
       checkpoint(rdd2, reliableCheckpoint)
       rdd2.count()
       assert(rdd1.isCheckpointed === checkpointAllMarkedAncestors)
-      assert(rdd2.isCheckpointed)
+      assert(rdd2.isCheckpointed === true)
     } finally {
       sc.setLocalProperty(RDD.CHECKPOINT_ALL_MARKED_ANCESTORS, null)
     }
@@ -587,10 +586,11 @@ object CheckpointSuite {
 class CheckpointCompressionSuite extends SparkFunSuite with LocalSparkContext {
 
   test("checkpoint compression") {
-    withTempDir { checkpointDir =>
+    val checkpointDir = Utils.createTempDir()
+    try {
       val conf = new SparkConf()
         .set("spark.checkpoint.compress", "true")
-        .set(UI_ENABLED.key, "false")
+        .set("spark.ui.enabled", "false")
       sc = new SparkContext("local", "test", conf)
       sc.setCheckpointDir(checkpointDir.toString)
       val rdd = sc.makeRDD(1 to 20, numSlices = 1)
@@ -616,6 +616,8 @@ class CheckpointCompressionSuite extends SparkFunSuite with LocalSparkContext {
 
       // Verify that the compressed content can be read back
       assert(rdd.collect().toSeq === (1 to 20))
+    } finally {
+      Utils.deleteRecursively(checkpointDir)
     }
   }
 }

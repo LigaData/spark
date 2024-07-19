@@ -21,21 +21,20 @@ import java.util.{Locale, Properties, UUID}
 
 import scala.collection.JavaConverters._
 
-import org.apache.spark.annotation.Stable
+import org.apache.spark.annotation.InterfaceStability
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.catalog._
-import org.apache.spark.sql.catalyst.expressions.Literal
-import org.apache.spark.sql.catalyst.plans.logical.{AppendData, InsertIntoTable, LogicalPlan, OverwriteByExpression}
+import org.apache.spark.sql.catalyst.plans.logical.{AppendData, InsertIntoTable, LogicalPlan}
+import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.command.DDLUtils
-import org.apache.spark.sql.execution.datasources.{CreateTable, DataSource, LogicalRelation}
-import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2Utils, FileDataSourceV2, WriteToDataSourceV2}
+import org.apache.spark.sql.execution.datasources.{CreateTable, DataSource, DataSourceUtils, LogicalRelation}
+import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2Utils, WriteToDataSourceV2}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.sources.v2._
-import org.apache.spark.sql.sources.v2.writer.SupportsSaveMode
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 /**
  * Interface used to write a [[Dataset]] to external storage systems (e.g. file systems,
@@ -43,7 +42,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
  *
  * @since 1.4.0
  */
-@Stable
+@InterfaceStability.Stable
 final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
   private val df = ds.toDF()
@@ -100,6 +99,9 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
   /**
    * Adds an output option for the underlying data source.
    *
+   * All options are maintained in a case-insensitive way in terms of key names.
+   * If a new option has the same key case-insensitively, it will override the existing option.
+   *
    * You can set the following option(s):
    * <ul>
    * <li>`timeZone` (default session local timezone): sets the string that indicates a timezone
@@ -116,12 +118,18 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
   /**
    * Adds an output option for the underlying data source.
    *
+   * All options are maintained in a case-insensitive way in terms of key names.
+   * If a new option has the same key case-insensitively, it will override the existing option.
+   *
    * @since 2.0.0
    */
   def option(key: String, value: Boolean): DataFrameWriter[T] = option(key, value.toString)
 
   /**
    * Adds an output option for the underlying data source.
+   *
+   * All options are maintained in a case-insensitive way in terms of key names.
+   * If a new option has the same key case-insensitively, it will override the existing option.
    *
    * @since 2.0.0
    */
@@ -130,12 +138,18 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
   /**
    * Adds an output option for the underlying data source.
    *
+   * All options are maintained in a case-insensitive way in terms of key names.
+   * If a new option has the same key case-insensitively, it will override the existing option.
+   *
    * @since 2.0.0
    */
   def option(key: String, value: Double): DataFrameWriter[T] = option(key, value.toString)
 
   /**
    * (Scala-specific) Adds output options for the underlying data source.
+   *
+   * All options are maintained in a case-insensitive way in terms of key names.
+   * If a new option has the same key case-insensitively, it will override the existing option.
    *
    * You can set the following option(s):
    * <ul>
@@ -152,6 +166,9 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
   /**
    * Adds output options for the underlying data source.
+   *
+   * All options are maintained in a case-insensitive way in terms of key names.
+   * If a new option has the same key case-insensitively, it will override the existing option.
    *
    * You can set the following option(s):
    * <ul>
@@ -193,7 +210,8 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
   /**
    * Buckets the output by the given columns. If specified, the output is laid out on the file
-   * system similar to Hive's bucketing scheme.
+   * system similar to Hive's bucketing scheme, but with a different bucket hash function
+   * and is not compatible with Hive's bucketing.
    *
    * This is applicable for all file-based data sources (e.g. Parquet, JSON) starting with Spark
    * 2.1.0.
@@ -244,60 +262,24 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
     assertNotBucketed("save")
 
-    val session = df.sparkSession
-    val useV1Sources =
-      session.sessionState.conf.userV1SourceWriterList.toLowerCase(Locale.ROOT).split(",")
-    val lookupCls = DataSource.lookupDataSource(source, session.sessionState.conf)
-    val cls = lookupCls.newInstance() match {
-      case f: FileDataSourceV2 if useV1Sources.contains(f.shortName()) ||
-        useV1Sources.contains(lookupCls.getCanonicalName.toLowerCase(Locale.ROOT)) =>
-        f.fallBackFileFormat
-      case _ => lookupCls
-    }
-    // In Data Source V2 project, partitioning is still under development.
-    // Here we fallback to V1 if partitioning columns are specified.
-    // TODO(SPARK-26778): use V2 implementations when partitioning feature is supported.
-    if (classOf[TableProvider].isAssignableFrom(cls) && partitioningColumns.isEmpty) {
-      val provider = cls.getConstructor().newInstance().asInstanceOf[TableProvider]
-      val sessionOptions = DataSourceV2Utils.extractSessionConfigs(
-        provider, session.sessionState.conf)
-      val options = sessionOptions ++ extraOptions
-      val dsOptions = new CaseInsensitiveStringMap(options.asJava)
+    val cls = DataSource.lookupDataSource(source, df.sparkSession.sessionState.conf)
+    if (classOf[DataSourceV2].isAssignableFrom(cls)) {
+      val source = cls.newInstance().asInstanceOf[DataSourceV2]
+      source match {
+        case ws: WriteSupport =>
+          val sessionOptions = DataSourceV2Utils.extractSessionConfigs(
+            source,
+            df.sparkSession.sessionState.conf)
+          val options = sessionOptions.filterKeys(!extraOptions.contains(_)) ++ extraOptions.toMap
 
-      provider.getTable(dsOptions) match {
-        case table: SupportsBatchWrite =>
-          lazy val relation = DataSourceV2Relation.create(table, dsOptions)
-          mode match {
-            case SaveMode.Append =>
-              runCommand(df.sparkSession, "save") {
-                AppendData.byName(relation, df.logicalPlan)
-              }
+          val writer = ws.createWriter(
+            UUID.randomUUID.toString, df.logicalPlan.output.toStructType, mode,
+            new DataSourceOptions(options.asJava))
 
-            case SaveMode.Overwrite =>
-              // truncate the table
-              runCommand(df.sparkSession, "save") {
-                OverwriteByExpression.byName(relation, df.logicalPlan, Literal(true))
-              }
-
-            case _ =>
-              table.newWriteBuilder(dsOptions) match {
-                case writeBuilder: SupportsSaveMode =>
-                  val write = writeBuilder.mode(mode)
-                      .withQueryId(UUID.randomUUID().toString)
-                      .withInputDataSchema(df.logicalPlan.schema)
-                      .buildForBatch()
-                  // It can only return null with `SupportsSaveMode`. We can clean it up after
-                  // removing `SupportsSaveMode`.
-                  if (write != null) {
-                    runCommand(df.sparkSession, "save") {
-                      WriteToDataSourceV2(write, df.logicalPlan)
-                    }
-                  }
-
-                case _ =>
-                  throw new AnalysisException(
-                    s"data source ${table.name} does not support SaveMode $mode")
-              }
+          if (writer.isPresent) {
+            runCommand(df.sparkSession, "save") {
+              WriteToDataSourceV2(writer.get, df.logicalPlan)
+            }
           }
 
         // Streaming also uses the data source V2 API. So it may be that the data source implements
@@ -311,6 +293,14 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
   }
 
   private def saveToV1Source(): Unit = {
+    if (SparkSession.active.sessionState.conf.getConf(
+      SQLConf.LEGACY_PASS_PARTITION_BY_AS_OPTIONS)) {
+      partitioningColumns.foreach { columns =>
+        extraOptions += (DataSourceUtils.PARTITIONING_COLUMNS_KEY ->
+          DataSourceUtils.encodePartitioningColumns(columns))
+      }
+    }
+
     // Code path for data source v1.
     runCommand(df.sparkSession, "save") {
       DataSource(
@@ -541,7 +531,7 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
     // connectionProperties should override settings in extraOptions.
     this.extraOptions ++= connectionProperties.asScala
     // explicit url and dbtable should override all
-    this.extraOptions += ("url" -> url, "dbtable" -> table)
+    this.extraOptions ++= Seq("url" -> url, "dbtable" -> table)
     format("jdbc").save()
   }
 
@@ -559,11 +549,11 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
    * one of the known case-insensitive shorten names (`none`, `bzip2`, `gzip`, `lz4`,
    * `snappy` and `deflate`). </li>
    * <li>`dateFormat` (default `yyyy-MM-dd`): sets the string that indicates a date format.
-   * Custom date formats follow the formats at `java.time.format.DateTimeFormatter`.
-   * This applies to date type.</li>
+   * Custom date formats follow the formats at `java.text.SimpleDateFormat`. This applies to
+   * date type.</li>
    * <li>`timestampFormat` (default `yyyy-MM-dd'T'HH:mm:ss.SSSXXX`): sets the string that
    * indicates a timestamp format. Custom date formats follow the formats at
-   * `java.time.format.DateTimeFormatter`. This applies to timestamp type.</li>
+   * `java.text.SimpleDateFormat`. This applies to timestamp type.</li>
    * <li>`encoding` (by default it is not set): specifies encoding (charset) of saved json
    * files. If it is not set, the UTF-8 charset will be used. </li>
    * <li>`lineSep` (default `\n`): defines the line separator that should be used for writing.</li>
@@ -613,7 +603,6 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
    * </ul>
    *
    * @since 1.5.0
-   * @note Currently, this method can only be used after enabling Hive support
    */
   def orc(path: String): Unit = {
     format("orc").save(path)
@@ -630,7 +619,6 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
    *   // Java:
    *   df.write().text("/path/to/output")
    * }}}
-   * The text files will be encoded as UTF-8.
    *
    * You can set the following option(s) for writing text files:
    * <ul>
@@ -679,17 +667,15 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
    * one of the known case-insensitive shorten names (`none`, `bzip2`, `gzip`, `lz4`,
    * `snappy` and `deflate`). </li>
    * <li>`dateFormat` (default `yyyy-MM-dd`): sets the string that indicates a date format.
-   * Custom date formats follow the formats at `java.time.format.DateTimeFormatter`.
-   * This applies to date type.</li>
+   * Custom date formats follow the formats at `java.text.SimpleDateFormat`. This applies to
+   * date type.</li>
    * <li>`timestampFormat` (default `yyyy-MM-dd'T'HH:mm:ss.SSSXXX`): sets the string that
    * indicates a timestamp format. Custom date formats follow the formats at
-   * `java.time.format.DateTimeFormatter`. This applies to timestamp type.</li>
+   * `java.text.SimpleDateFormat`. This applies to timestamp type.</li>
    * <li>`ignoreLeadingWhiteSpace` (default `true`): a flag indicating whether or not leading
    * whitespaces from values being written should be skipped.</li>
    * <li>`ignoreTrailingWhiteSpace` (default `true`): a flag indicating defines whether or not
    * trailing whitespaces from values being written should be skipped.</li>
-   * <li>`lineSep` (default `\n`): defines the line separator that should be used for writing.
-   * Maximum length is 1 character.</li>
    * </ul>
    *
    * @since 2.0.0
@@ -704,8 +690,17 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
    */
   private def runCommand(session: SparkSession, name: String)(command: LogicalPlan): Unit = {
     val qe = session.sessionState.executePlan(command)
-    // call `QueryExecution.toRDD` to trigger the execution of commands.
-    SQLExecution.withNewExecutionId(session, qe, Some(name))(qe.toRdd)
+    try {
+      val start = System.nanoTime()
+      // call `QueryExecution.toRDD` to trigger the execution of commands.
+      SQLExecution.withNewExecutionId(session, qe)(qe.toRdd)
+      val end = System.nanoTime()
+      session.listenerManager.onSuccess(name, qe, end - start)
+    } catch {
+      case e: Throwable =>
+        session.listenerManager.onFailure(name, qe, e)
+        throw e
+    }
   }
 
   ///////////////////////////////////////////////////////////////////////////////////////
@@ -716,7 +711,7 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
   private var mode: SaveMode = SaveMode.ErrorIfExists
 
-  private val extraOptions = new scala.collection.mutable.HashMap[String, String]
+  private var extraOptions = CaseInsensitiveMap[String](Map.empty)
 
   private var partitioningColumns: Option[Seq[String]] = None
 

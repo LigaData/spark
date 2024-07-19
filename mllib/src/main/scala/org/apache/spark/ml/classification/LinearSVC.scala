@@ -173,8 +173,8 @@ class LinearSVC @Since("2.2.0") (
 
     instr.logPipelineStage(this)
     instr.logDataset(dataset)
-    instr.logParams(this, labelCol, weightCol, featuresCol, predictionCol, rawPredictionCol,
-      regParam, maxIter, fitIntercept, tol, standardization, threshold, aggregationDepth)
+    instr.logParams(this, regParam, maxIter, fitIntercept, tol, standardization, threshold,
+      aggregationDepth)
 
     val (summarizer, labelSummarizer) = {
       val seqOp = (c: (MultivariateOnlineSummarizer, MultiClassSummarizer),
@@ -248,7 +248,7 @@ class LinearSVC @Since("2.2.0") (
         scaledObjectiveHistory += state.adjustedValue
       }
 
-      bcFeaturesStd.destroy()
+      bcFeaturesStd.destroy(blocking = false)
       if (state == null) {
         val msg = s"${optimizer.getClass.getName} failed."
         instr.logError(msg)
@@ -313,7 +313,8 @@ class LinearSVCModel private[classification] (
   setDefault(threshold, 0.0)
 
   @Since("2.2.0")
-  def setWeightCol(value: Double): this.type = set(threshold, value)
+  @deprecated("This method is deprecated and will be removed in 3.0.0.", "2.4.4")
+  def setWeightCol(value: Double): this.type = this
 
   private val margin: Vector => Double = (features) => {
     BLAS.dot(features, coefficients) + intercept

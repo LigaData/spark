@@ -117,13 +117,4 @@ class TimestampFormatterSuite extends SparkFunSuite with SQLHelper {
     assert(micros === TimeUnit.SECONDS.toMicros(
       LocalDateTime.of(2009, 3, 20, 11, 30, 1).toEpochSecond(ZoneOffset.UTC)))
   }
-
-  test("format fraction of second") {
-    val formatter = TimestampFormatter.getFractionFormatter(TimeZone.getTimeZone("UTC"))
-    assert(formatter.format(0) === "1970-01-01 00:00:00")
-    assert(formatter.format(1) === "1970-01-01 00:00:00.000001")
-    assert(formatter.format(1000) === "1970-01-01 00:00:00.001")
-    assert(formatter.format(900000) === "1970-01-01 00:00:00.9")
-    assert(formatter.format(1000000) === "1970-01-01 00:00:01")
-  }
 }

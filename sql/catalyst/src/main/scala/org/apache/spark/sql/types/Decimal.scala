@@ -20,7 +20,7 @@ package org.apache.spark.sql.types
 import java.lang.{Long => JLong}
 import java.math.{BigInteger, MathContext, RoundingMode}
 
-import org.apache.spark.annotation.Unstable
+import org.apache.spark.annotation.InterfaceStability
 import org.apache.spark.sql.AnalysisException
 
 /**
@@ -31,7 +31,7 @@ import org.apache.spark.sql.AnalysisException
  * - If decimalVal is set, it represents the whole decimal value
  * - Otherwise, the decimal value is longVal / (10 ** _scale)
  */
-@Unstable
+@InterfaceStability.Unstable
 final class Decimal extends Ordered[Decimal] with Serializable {
   import org.apache.spark.sql.types.Decimal._
 
@@ -419,7 +419,7 @@ final class Decimal extends Ordered[Decimal] with Serializable {
   }
 }
 
-@Unstable
+@InterfaceStability.Unstable
 object Decimal {
   val ROUND_HALF_UP = BigDecimal.RoundingMode.HALF_UP
   val ROUND_HALF_EVEN = BigDecimal.RoundingMode.HALF_EVEN
@@ -432,7 +432,7 @@ object Decimal {
   /** Maximum number of decimal digits a Long can represent */
   val MAX_LONG_DIGITS = 18
 
-  private val POW_10 = Array.tabulate[Long](MAX_LONG_DIGITS + 1)(i => math.pow(10, i).toLong)
+  val POW_10 = Array.tabulate[Long](MAX_LONG_DIGITS + 1)(i => math.pow(10, i).toLong)
 
   private val BIG_DEC_ZERO = BigDecimal(0)
 

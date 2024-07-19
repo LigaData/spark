@@ -94,14 +94,6 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
     assert(compressedFile.length < normalFile.length)
   }
 
-  test("text files do not allow null rows") {
-    sc = new SparkContext("local", "test")
-    val outputDir = new File(tempDir, "output").getAbsolutePath
-    val nums = sc.makeRDD((1 to 100) ++ Seq(null))
-    val exception = intercept[SparkException](nums.saveAsTextFile(outputDir))
-    assert(Utils.exceptionString(exception).contains("text files do not allow null rows"))
-  }
-
   test("SequenceFiles") {
     sc = new SparkContext("local", "test")
     val outputDir = new File(tempDir, "output").getAbsolutePath
@@ -210,7 +202,7 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
       sc = new SparkContext("local", "test")
       val objs = sc.makeRDD(1 to 3).map { x =>
         val loader = Thread.currentThread().getContextClassLoader
-        Class.forName(className, true, loader).getConstructor().newInstance()
+        Class.forName(className, true, loader).newInstance()
       }
       val outputDir = new File(tempDir, "output").getAbsolutePath
       objs.saveAsObjectFile(outputDir)
@@ -314,18 +306,17 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
       .set("spark.files.openCostInBytes", "0")
       .set("spark.default.parallelism", "1"))
 
-    withTempDir { tempDir =>
-      val tempDirPath = tempDir.getAbsolutePath
+    val tempDir = Utils.createTempDir()
+    val tempDirPath = tempDir.getAbsolutePath
 
-      for (i <- 0 until 8) {
-        val tempFile = new File(tempDir, s"part-0000$i")
-        Files.write("someline1 in file1\nsomeline2 in file1\nsomeline3 in file1", tempFile,
-          StandardCharsets.UTF_8)
-      }
+    for (i <- 0 until 8) {
+      val tempFile = new File(tempDir, s"part-0000$i")
+      Files.write("someline1 in file1\nsomeline2 in file1\nsomeline3 in file1", tempFile,
+        StandardCharsets.UTF_8)
+    }
 
-      for (p <- Seq(1, 2, 8)) {
-        assert(sc.binaryFiles(tempDirPath, minPartitions = p).getNumPartitions === p)
-      }
+    for (p <- Seq(1, 2, 8)) {
+      assert(sc.binaryFiles(tempDirPath, minPartitions = p).getNumPartitions === p)
     }
   }
 
@@ -388,7 +379,7 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
     sc = new SparkContext("local", "test")
     val randomRDD = sc.parallelize(Array((1, "a"), (1, "a"), (2, "b"), (3, "c")), 1)
     randomRDD.saveAsTextFile(tempDir.getPath + "/output")
-    assert(new File(tempDir.getPath + "/output/part-00000").exists())
+    assert(new File(tempDir.getPath + "/output/part-00000").exists() === true)
     intercept[FileAlreadyExistsException] {
       randomRDD.saveAsTextFile(tempDir.getPath + "/output")
     }
@@ -400,9 +391,9 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
     sc = new SparkContext(conf)
     val randomRDD = sc.parallelize(Array((1, "a"), (1, "a"), (2, "b"), (3, "c")), 1)
     randomRDD.saveAsTextFile(tempDir.getPath + "/output")
-    assert(new File(tempDir.getPath + "/output/part-00000").exists())
+    assert(new File(tempDir.getPath + "/output/part-00000").exists() === true)
     randomRDD.saveAsTextFile(tempDir.getPath + "/output")
-    assert(new File(tempDir.getPath + "/output/part-00000").exists())
+    assert(new File(tempDir.getPath + "/output/part-00000").exists() === true)
   }
 
   test ("prevent user from overwriting the empty directory (new Hadoop API)") {
@@ -420,7 +411,7 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
       Array(("key1", "a"), ("key2", "a"), ("key3", "b"), ("key4", "c")), 1)
     randomRDD.saveAsNewAPIHadoopFile[NewTextOutputFormat[String, String]](
       tempDir.getPath + "/output")
-    assert(new File(tempDir.getPath + "/output/part-r-00000").exists())
+    assert(new File(tempDir.getPath + "/output/part-r-00000").exists() === true)
     intercept[FileAlreadyExistsException] {
       randomRDD.saveAsNewAPIHadoopFile[NewTextOutputFormat[String, String]](tempDir.getPath)
     }
@@ -434,10 +425,10 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
       Array(("key1", "a"), ("key2", "a"), ("key3", "b"), ("key4", "c")), 1)
     randomRDD.saveAsNewAPIHadoopFile[NewTextOutputFormat[String, String]](
       tempDir.getPath + "/output")
-    assert(new File(tempDir.getPath + "/output/part-r-00000").exists())
+    assert(new File(tempDir.getPath + "/output/part-r-00000").exists() === true)
     randomRDD.saveAsNewAPIHadoopFile[NewTextOutputFormat[String, String]](
       tempDir.getPath + "/output")
-    assert(new File(tempDir.getPath + "/output/part-r-00000").exists())
+    assert(new File(tempDir.getPath + "/output/part-r-00000").exists() === true)
   }
 
   test ("save Hadoop Dataset through old Hadoop API") {
@@ -450,7 +441,7 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
     job.set("mapred.output.format.class", classOf[TextOutputFormat[String, String]].getName)
     job.set("mapreduce.output.fileoutputformat.outputdir", tempDir.getPath + "/outputDataset_old")
     randomRDD.saveAsHadoopDataset(job)
-    assert(new File(tempDir.getPath + "/outputDataset_old/part-00000").exists())
+    assert(new File(tempDir.getPath + "/outputDataset_old/part-00000").exists() === true)
   }
 
   test ("save Hadoop Dataset through new Hadoop API") {
@@ -465,7 +456,7 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
     jobConfig.set("mapreduce.output.fileoutputformat.outputdir",
       tempDir.getPath + "/outputDataset_new")
     randomRDD.saveAsNewAPIHadoopDataset(jobConfig)
-    assert(new File(tempDir.getPath + "/outputDataset_new/part-r-00000").exists())
+    assert(new File(tempDir.getPath + "/outputDataset_new/part-r-00000").exists() === true)
   }
 
   test("Get input files via old Hadoop API") {
@@ -572,7 +563,7 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
       sc.parallelize(data, actualPartitionNum)
         .saveAsHadoopFile[TextOutputFormat[String, String]](output.getPath)
       for (i <- 0 until actualPartitionNum) {
-        assert(new File(output, s"part-0000$i").exists())
+        assert(new File(output, s"part-0000$i").exists() === true)
       }
       val hadoopRDD = sc.textFile(new File(output, "part-*").getPath)
       assert(hadoopRDD.partitions.length === expectedPartitionNum)
@@ -613,7 +604,7 @@ class FileSuite extends SparkFunSuite with LocalSparkContext {
       sc.parallelize(data, actualPartitionNum)
         .saveAsNewAPIHadoopFile[NewTextOutputFormat[String, String]](output.getPath)
       for (i <- 0 until actualPartitionNum) {
-        assert(new File(output, s"part-r-0000$i").exists())
+        assert(new File(output, s"part-r-0000$i").exists() === true)
       }
       val hadoopRDD = sc.newAPIHadoopFile(new File(output, "part-r-*").getPath,
         classOf[NewTextInputFormat], classOf[LongWritable], classOf[Text])

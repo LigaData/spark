@@ -34,7 +34,6 @@ class ColumnPruningSuite extends PlanTest {
     val batches = Batch("Column pruning", FixedPoint(100),
       PushDownPredicate,
       ColumnPruning,
-      RemoveNoopOperators,
       CollapseProject) :: Nil
   }
 
@@ -341,8 +340,10 @@ class ColumnPruningSuite extends PlanTest {
   test("Column pruning on Union") {
     val input1 = LocalRelation('a.int, 'b.string, 'c.double)
     val input2 = LocalRelation('c.int, 'd.string, 'e.double)
-    val query = Project('b :: Nil, Union(input1 :: input2 :: Nil)).analyze
-    val expected = Union(Project('b :: Nil, input1) :: Project('d :: Nil, input2) :: Nil).analyze
+    val query = Project('b :: Nil,
+      Union(input1 :: input2 :: Nil)).analyze
+    val expected = Project('b :: Nil,
+      Union(Project('b :: Nil, input1) :: Project('d :: Nil, input2) :: Nil)).analyze
     comparePlans(Optimize.execute(query), expected)
   }
 
@@ -353,15 +354,15 @@ class ColumnPruningSuite extends PlanTest {
       Project(Seq($"x.key", $"y.key"),
         Join(
           SubqueryAlias("x", input),
-          SubqueryAlias("y", input), Inner, None, JoinHint.NONE)).analyze
+          ResolvedHint(SubqueryAlias("y", input)), Inner, None)).analyze
 
     val optimized = Optimize.execute(query)
 
     val expected =
       Join(
         Project(Seq($"x.key"), SubqueryAlias("x", input)),
-        Project(Seq($"y.key"), SubqueryAlias("y", input)),
-        Inner, None, JoinHint.NONE).analyze
+        ResolvedHint(Project(Seq($"y.key"), SubqueryAlias("y", input))),
+        Inner, None).analyze
 
     comparePlans(optimized, expected)
   }
@@ -388,7 +389,7 @@ class ColumnPruningSuite extends PlanTest {
 
     val query2 = Sample(0.0, 0.6, false, 11L, x).select('a as 'aa)
     val optimized2 = Optimize.execute(query2.analyze)
-    val expected2 = Sample(0.0, 0.6, false, 11L, x.select('a as 'aa))
+    val expected2 = Sample(0.0, 0.6, false, 11L, x.select('a)).select('a as 'aa)
     comparePlans(optimized2, expected2.analyze)
   }
 
@@ -399,5 +400,6 @@ class ColumnPruningSuite extends PlanTest {
     val expected = input.where(rand(0L) > 0.5).where('key < 10).select('key).analyze
     comparePlans(optimized, expected)
   }
+
   // todo: add more tests for column pruning
 }

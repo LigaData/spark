@@ -341,174 +341,6 @@ case class MapValues(child: Expression)
 }
 
 /**
- * Returns an unordered array of all entries in the given map.
- */
-@ExpressionDescription(
-  usage = "_FUNC_(map) - Returns an unordered array of all entries in the given map.",
-  examples = """
-    Examples:
-      > SELECT _FUNC_(map(1, 'a', 2, 'b'));
-       [{"key":1,"value":"a"},{"key":2,"value":"b"}]
-  """,
-  since = "3.0.0")
-case class MapEntries(child: Expression) extends UnaryExpression with ExpectsInputTypes {
-
-  override def inputTypes: Seq[AbstractDataType] = Seq(MapType)
-
-  @transient private lazy val childDataType: MapType = child.dataType.asInstanceOf[MapType]
-
-  override def dataType: DataType = {
-    ArrayType(
-      StructType(
-        StructField("key", childDataType.keyType, false) ::
-        StructField("value", childDataType.valueType, childDataType.valueContainsNull) ::
-        Nil),
-      false)
-  }
-
-  override protected def nullSafeEval(input: Any): Any = {
-    val childMap = input.asInstanceOf[MapData]
-    val keys = childMap.keyArray()
-    val values = childMap.valueArray()
-    val length = childMap.numElements()
-    val resultData = new Array[AnyRef](length)
-    var i = 0
-    while (i < length) {
-      val key = keys.get(i, childDataType.keyType)
-      val value = values.get(i, childDataType.valueType)
-      val row = new GenericInternalRow(Array[Any](key, value))
-      resultData.update(i, row)
-      i += 1
-    }
-    new GenericArrayData(resultData)
-  }
-
-  override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    nullSafeCodeGen(ctx, ev, c => {
-      val arrayData = ctx.freshName("arrayData")
-      val numElements = ctx.freshName("numElements")
-      val keys = ctx.freshName("keys")
-      val values = ctx.freshName("values")
-      val isKeyPrimitive = CodeGenerator.isPrimitiveType(childDataType.keyType)
-      val isValuePrimitive = CodeGenerator.isPrimitiveType(childDataType.valueType)
-
-      val wordSize = UnsafeRow.WORD_SIZE
-      val structSize = UnsafeRow.calculateBitSetWidthInBytes(2) + wordSize * 2
-      val (isPrimitive, elementSize) = if (isKeyPrimitive && isValuePrimitive) {
-        (true, structSize + wordSize)
-      } else {
-        (false, -1)
-      }
-
-      val allocation =
-        s"""
-           |ArrayData $arrayData = ArrayData.allocateArrayData(
-           |  $elementSize, $numElements, " $prettyName failed.");
-         """.stripMargin
-
-      val code = if (isPrimitive) {
-        val genCodeForPrimitive = genCodeForPrimitiveElements(
-          ctx, arrayData, keys, values, ev.value, numElements, structSize)
-        s"""
-           |if ($arrayData instanceof UnsafeArrayData) {
-           |  $genCodeForPrimitive
-           |} else {
-           |  ${genCodeForAnyElements(ctx, arrayData, keys, values, ev.value, numElements)}
-           |}
-         """.stripMargin
-      } else {
-        s"${genCodeForAnyElements(ctx, arrayData, keys, values, ev.value, numElements)}"
-      }
-
-      s"""
-         |final int $numElements = $c.numElements();
-         |final ArrayData $keys = $c.keyArray();
-         |final ArrayData $values = $c.valueArray();
-         |$allocation
-         |$code
-       """.stripMargin
-    })
-  }
-
-  private def getKey(varName: String, index: String) =
-    CodeGenerator.getValue(varName, childDataType.keyType, index)
-
-  private def getValue(varName: String, index: String) =
-    CodeGenerator.getValue(varName, childDataType.valueType, index)
-
-  private def genCodeForPrimitiveElements(
-      ctx: CodegenContext,
-      arrayData: String,
-      keys: String,
-      values: String,
-      resultArrayData: String,
-      numElements: String,
-      structSize: Int): String = {
-    val unsafeArrayData = ctx.freshName("unsafeArrayData")
-    val baseObject = ctx.freshName("baseObject")
-    val unsafeRow = ctx.freshName("unsafeRow")
-    val structsOffset = ctx.freshName("structsOffset")
-    val offset = ctx.freshName("offset")
-    val z = ctx.freshName("z")
-    val calculateHeader = "UnsafeArrayData.calculateHeaderPortionInBytes"
-
-    val baseOffset = "Platform.BYTE_ARRAY_OFFSET"
-    val wordSize = UnsafeRow.WORD_SIZE
-    val structSizeAsLong = s"${structSize}L"
-
-    val setKey = CodeGenerator.setColumn(unsafeRow, childDataType.keyType, 0, getKey(keys, z))
-
-    val valueAssignmentChecked = CodeGenerator.createArrayAssignment(
-      unsafeRow, childDataType.valueType, values, "1", z, childDataType.valueContainsNull)
-
-    s"""
-       |UnsafeArrayData $unsafeArrayData = (UnsafeArrayData)$arrayData;
-       |Object $baseObject = $unsafeArrayData.getBaseObject();
-       |final int $structsOffset = $calculateHeader($numElements) + $numElements * $wordSize;
-       |UnsafeRow $unsafeRow = new UnsafeRow(2);
-       |for (int $z = 0; $z < $numElements; $z++) {
-       |  long $offset = $structsOffset + $z * $structSizeAsLong;
-       |  $unsafeArrayData.setLong($z, ($offset << 32) + $structSizeAsLong);
-       |  $unsafeRow.pointTo($baseObject, $baseOffset + $offset, $structSize);
-       |  $setKey;
-       |  $valueAssignmentChecked
-       |}
-       |$resultArrayData = $arrayData;
-     """.stripMargin
-  }
-
-  private def genCodeForAnyElements(
-      ctx: CodegenContext,
-      arrayData: String,
-      keys: String,
-      values: String,
-      resultArrayData: String,
-      numElements: String): String = {
-    val z = ctx.freshName("z")
-    val isValuePrimitive = CodeGenerator.isPrimitiveType(childDataType.valueType)
-    val getValueWithCheck = if (childDataType.valueContainsNull && isValuePrimitive) {
-      s"$values.isNullAt($z) ? null : (Object)${getValue(values, z)}"
-    } else {
-      getValue(values, z)
-    }
-
-    val rowClass = classOf[GenericInternalRow].getName
-    val genericArrayDataClass = classOf[GenericArrayData].getName
-    val genericArrayData = ctx.freshName("genericArrayData")
-    val rowObject = s"new $rowClass(new Object[]{${getKey(keys, z)}, $getValueWithCheck})"
-    s"""
-       |$genericArrayDataClass $genericArrayData = ($genericArrayDataClass)$arrayData;
-       |for (int $z = 0; $z < $numElements; $z++) {
-       |  $genericArrayData.update($z, $rowObject);
-       |}
-       |$resultArrayData = $arrayData;
-     """.stripMargin
-  }
-
-  override def prettyName: String = "map_entries"
-}
-
-/**
  * Returns the union of all the given maps.
  */
 @ExpressionDescription(
@@ -521,18 +353,13 @@ case class MapEntries(child: Expression) extends UnaryExpression with ExpectsInp
 case class MapConcat(children: Seq[Expression]) extends ComplexTypeMergingExpression {
 
   override def checkInputDataTypes(): TypeCheckResult = {
-    val funcName = s"function $prettyName"
+    var funcName = s"function $prettyName"
     if (children.exists(!_.dataType.isInstanceOf[MapType])) {
       TypeCheckResult.TypeCheckFailure(
         s"input to $funcName should all be of type map, but it's " +
           children.map(_.dataType.catalogString).mkString("[", ", ", "]"))
     } else {
-      val sameTypeCheck = TypeUtils.checkForSameTypeInputExpr(children.map(_.dataType), funcName)
-      if (sameTypeCheck.isFailure) {
-        sameTypeCheck
-      } else {
-        TypeUtils.checkForMapKeyType(dataType.keyType)
-      }
+      TypeUtils.checkForSameTypeInputExpr(children.map(_.dataType), funcName)
     }
   }
 
@@ -546,25 +373,51 @@ case class MapConcat(children: Seq[Expression]) extends ComplexTypeMergingExpres
 
   override def nullable: Boolean = children.exists(_.nullable)
 
-  private lazy val mapBuilder = new ArrayBasedMapBuilder(dataType.keyType, dataType.valueType)
-
   override def eval(input: InternalRow): Any = {
-    val maps = children.map(_.eval(input).asInstanceOf[MapData])
+    val maps = children.map(_.eval(input))
     if (maps.contains(null)) {
       return null
     }
+    val keyArrayDatas = maps.map(_.asInstanceOf[MapData].keyArray())
+    val valueArrayDatas = maps.map(_.asInstanceOf[MapData].valueArray())
 
-    for (map <- maps) {
-      mapBuilder.putAll(map.keyArray(), map.valueArray())
+    val numElements = keyArrayDatas.foldLeft(0L)((sum, ad) => sum + ad.numElements())
+    if (numElements > ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH) {
+      throw new RuntimeException(s"Unsuccessful attempt to concat maps with $numElements " +
+        s"elements due to exceeding the map size limit " +
+        s"${ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH}.")
     }
-    mapBuilder.build()
+    val finalKeyArray = new Array[AnyRef](numElements.toInt)
+    val finalValueArray = new Array[AnyRef](numElements.toInt)
+    var position = 0
+    for (i <- keyArrayDatas.indices) {
+      val keyArray = keyArrayDatas(i).toObjectArray(dataType.keyType)
+      val valueArray = valueArrayDatas(i).toObjectArray(dataType.valueType)
+      Array.copy(keyArray, 0, finalKeyArray, position, keyArray.length)
+      Array.copy(valueArray, 0, finalValueArray, position, valueArray.length)
+      position += keyArray.length
+    }
+
+    new ArrayBasedMapData(new GenericArrayData(finalKeyArray),
+      new GenericArrayData(finalValueArray))
   }
 
   override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
     val mapCodes = children.map(_.genCode(ctx))
+    val keyType = dataType.keyType
+    val valueType = dataType.valueType
     val argsName = ctx.freshName("args")
     val hasNullName = ctx.freshName("hasNull")
-    val builderTerm = ctx.addReferenceObj("mapBuilder", mapBuilder)
+    val mapDataClass = classOf[MapData].getName
+    val arrayBasedMapDataClass = classOf[ArrayBasedMapData].getName
+    val arrayDataClass = classOf[ArrayData].getName
+
+    val init =
+      s"""
+        |$mapDataClass[] $argsName = new $mapDataClass[${mapCodes.size}];
+        |boolean ${ev.isNull}, $hasNullName = false;
+        |$mapDataClass ${ev.value} = null;
+      """.stripMargin
 
     val assignments = mapCodes.zip(children.map(_.nullable)).zipWithIndex.map {
       case ((m, true), i) =>
@@ -587,10 +440,10 @@ case class MapConcat(children: Seq[Expression]) extends ComplexTypeMergingExpres
          """.stripMargin
     }
 
-    val prepareMaps = ctx.splitExpressionsWithCurrentInputs(
+    val codes = ctx.splitExpressionsWithCurrentInputs(
       expressions = assignments,
       funcName = "getMapConcatInputs",
-      extraArguments = (s"MapData[]", argsName) :: ("boolean", hasNullName) :: Nil,
+      extraArguments = (s"$mapDataClass[]", argsName) :: ("boolean", hasNullName) :: Nil,
       returnType = "boolean",
       makeSplitFunction = body =>
         s"""
@@ -601,25 +454,89 @@ case class MapConcat(children: Seq[Expression]) extends ComplexTypeMergingExpres
     )
 
     val idxName = ctx.freshName("idx")
+    val numElementsName = ctx.freshName("numElems")
+    val finKeysName = ctx.freshName("finalKeys")
+    val finValsName = ctx.freshName("finalValues")
+
+    val keyConcat = genCodeForArrays(ctx, keyType, false)
+
+    val valueConcat =
+      if (valueType.sameType(keyType) &&
+          !(CodeGenerator.isPrimitiveType(valueType) && dataType.valueContainsNull)) {
+        keyConcat
+      } else {
+        genCodeForArrays(ctx, valueType, dataType.valueContainsNull)
+      }
+
+    val keyArgsName = ctx.freshName("keyArgs")
+    val valArgsName = ctx.freshName("valArgs")
+
     val mapMerge =
       s"""
-        |for (int $idxName = 0; $idxName < $argsName.length; $idxName++) {
-        |  $builderTerm.putAll($argsName[$idxName].keyArray(), $argsName[$idxName].valueArray());
+        |${ev.isNull} = $hasNullName;
+        |if (!${ev.isNull}) {
+        |  $arrayDataClass[] $keyArgsName = new $arrayDataClass[${mapCodes.size}];
+        |  $arrayDataClass[] $valArgsName = new $arrayDataClass[${mapCodes.size}];
+        |  long $numElementsName = 0;
+        |  for (int $idxName = 0; $idxName < $argsName.length; $idxName++) {
+        |    $keyArgsName[$idxName] = $argsName[$idxName].keyArray();
+        |    $valArgsName[$idxName] = $argsName[$idxName].valueArray();
+        |    $numElementsName += $argsName[$idxName].numElements();
+        |  }
+        |  if ($numElementsName > ${ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH}) {
+        |    throw new RuntimeException("Unsuccessful attempt to concat maps with " +
+        |       $numElementsName + " elements due to exceeding the map size limit " +
+        |       "${ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH}.");
+        |  }
+        |  $arrayDataClass $finKeysName = $keyConcat($keyArgsName,
+        |    (int) $numElementsName);
+        |  $arrayDataClass $finValsName = $valueConcat($valArgsName,
+        |    (int) $numElementsName);
+        |  ${ev.value} = new $arrayBasedMapDataClass($finKeysName, $finValsName);
         |}
-        |${ev.value} = $builderTerm.build();
       """.stripMargin
 
     ev.copy(
       code = code"""
-        |MapData[] $argsName = new MapData[${mapCodes.size}];
-        |boolean $hasNullName = false;
-        |$prepareMaps
-        |boolean ${ev.isNull} = $hasNullName;
-        |MapData ${ev.value} = null;
-        |if (!$hasNullName) {
-        |  $mapMerge
-        |}
+        |$init
+        |$codes
+        |$mapMerge
       """.stripMargin)
+  }
+
+  private def genCodeForArrays(
+      ctx: CodegenContext,
+      elementType: DataType,
+      checkForNull: Boolean): String = {
+    val counter = ctx.freshName("counter")
+    val arrayData = ctx.freshName("arrayData")
+    val argsName = ctx.freshName("args")
+    val numElemName = ctx.freshName("numElements")
+    val y = ctx.freshName("y")
+    val z = ctx.freshName("z")
+
+    val allocation = CodeGenerator.createArrayData(
+      arrayData, elementType, numElemName, s" $prettyName failed.")
+    val assignment = CodeGenerator.createArrayAssignment(
+      arrayData, elementType, s"$argsName[$y]", counter, z, checkForNull)
+
+    val concat = ctx.freshName("concat")
+    val concatDef =
+      s"""
+         |private ArrayData $concat(ArrayData[] $argsName, int $numElemName) {
+         |  $allocation
+         |  int $counter = 0;
+         |  for (int $y = 0; $y < ${children.length}; $y++) {
+         |    for (int $z = 0; $z < $argsName[$y].numElements(); $z++) {
+         |      $assignment
+         |      $counter++;
+         |    }
+         |  }
+         |  return $arrayData;
+         |}
+       """.stripMargin
+
+    ctx.addNewFunction(concat, concatDef)
   }
 
   override def prettyName: String = "map_concat"
@@ -655,48 +572,174 @@ case class MapFromEntries(child: Expression) extends UnaryExpression {
   @transient override lazy val dataType: MapType = dataTypeDetails.get._1
 
   override def checkInputDataTypes(): TypeCheckResult = dataTypeDetails match {
-    case Some((mapType, _, _)) =>
-      TypeUtils.checkForMapKeyType(mapType.keyType)
+    case Some(_) => TypeCheckResult.TypeCheckSuccess
     case None => TypeCheckResult.TypeCheckFailure(s"'${child.sql}' is of " +
       s"${child.dataType.catalogString} type. $prettyName accepts only arrays of pair structs.")
   }
 
-  private lazy val mapBuilder = new ArrayBasedMapBuilder(dataType.keyType, dataType.valueType)
-
   override protected def nullSafeEval(input: Any): Any = {
-    val entries = input.asInstanceOf[ArrayData]
-    val numEntries = entries.numElements()
+    val arrayData = input.asInstanceOf[ArrayData]
+    val numEntries = arrayData.numElements()
     var i = 0
-    if (nullEntries) {
+    if(nullEntries) {
       while (i < numEntries) {
-        if (entries.isNullAt(i)) return null
+        if (arrayData.isNullAt(i)) return null
         i += 1
       }
     }
-
+    val keyArray = new Array[AnyRef](numEntries)
+    val valueArray = new Array[AnyRef](numEntries)
     i = 0
     while (i < numEntries) {
-      mapBuilder.put(entries.getStruct(i, 2))
+      val entry = arrayData.getStruct(i, 2)
+      val key = entry.get(0, dataType.keyType)
+      if (key == null) {
+        throw new RuntimeException("The first field from a struct (key) can't be null.")
+      }
+      keyArray.update(i, key)
+      val value = entry.get(1, dataType.valueType)
+      valueArray.update(i, value)
       i += 1
     }
-    mapBuilder.build()
+    ArrayBasedMapData(keyArray, valueArray)
   }
 
   override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
     nullSafeCodeGen(ctx, ev, c => {
       val numEntries = ctx.freshName("numEntries")
-      val builderTerm = ctx.addReferenceObj("mapBuilder", mapBuilder)
-      val i = ctx.freshName("idx")
+      val isKeyPrimitive = CodeGenerator.isPrimitiveType(dataType.keyType)
+      val isValuePrimitive = CodeGenerator.isPrimitiveType(dataType.valueType)
+      val code = if (isKeyPrimitive && isValuePrimitive) {
+        genCodeForPrimitiveElements(ctx, c, ev.value, numEntries)
+      } else {
+        genCodeForAnyElements(ctx, c, ev.value, numEntries)
+      }
       ctx.nullArrayElementsSaveExec(nullEntries, ev.isNull, c) {
         s"""
            |final int $numEntries = $c.numElements();
-           |for (int $i = 0; $i < $numEntries; $i++) {
-           |  $builderTerm.put($c.getStruct($i, 2));
-           |}
-           |${ev.value} = $builderTerm.build();
+           |$code
          """.stripMargin
       }
     })
+  }
+
+  private def genCodeForAssignmentLoop(
+      ctx: CodegenContext,
+      childVariable: String,
+      mapData: String,
+      numEntries: String,
+      keyAssignment: (String, String) => String,
+      valueAssignment: (String, String) => String): String = {
+    val entry = ctx.freshName("entry")
+    val i = ctx.freshName("idx")
+
+    val nullKeyCheck = if (dataTypeDetails.get._2) {
+      s"""
+         |if ($entry.isNullAt(0)) {
+         |  throw new RuntimeException("The first field from a struct (key) can't be null.");
+         |}
+       """.stripMargin
+    } else {
+      ""
+    }
+
+    s"""
+       |for (int $i = 0; $i < $numEntries; $i++) {
+       |  InternalRow $entry = $childVariable.getStruct($i, 2);
+       |  $nullKeyCheck
+       |  ${keyAssignment(CodeGenerator.getValue(entry, dataType.keyType, "0"), i)}
+       |  ${valueAssignment(entry, i)}
+       |}
+     """.stripMargin
+  }
+
+  private def genCodeForPrimitiveElements(
+      ctx: CodegenContext,
+      childVariable: String,
+      mapData: String,
+      numEntries: String): String = {
+    val byteArraySize = ctx.freshName("byteArraySize")
+    val keySectionSize = ctx.freshName("keySectionSize")
+    val valueSectionSize = ctx.freshName("valueSectionSize")
+    val data = ctx.freshName("byteArray")
+    val unsafeMapData = ctx.freshName("unsafeMapData")
+    val keyArrayData = ctx.freshName("keyArrayData")
+    val valueArrayData = ctx.freshName("valueArrayData")
+
+    val baseOffset = "Platform.BYTE_ARRAY_OFFSET"
+    val keySize = dataType.keyType.defaultSize
+    val valueSize = dataType.valueType.defaultSize
+    val kByteSize = s"UnsafeArrayData.calculateSizeOfUnderlyingByteArray($numEntries, $keySize)"
+    val vByteSize = s"UnsafeArrayData.calculateSizeOfUnderlyingByteArray($numEntries, $valueSize)"
+
+    val keyAssignment = (key: String, idx: String) =>
+      CodeGenerator.setArrayElement(keyArrayData, dataType.keyType, idx, key)
+    val valueAssignment = (entry: String, idx: String) =>
+      CodeGenerator.createArrayAssignment(
+        valueArrayData, dataType.valueType, entry, idx, "1", dataType.valueContainsNull)
+    val assignmentLoop = genCodeForAssignmentLoop(
+      ctx,
+      childVariable,
+      mapData,
+      numEntries,
+      keyAssignment,
+      valueAssignment
+    )
+
+    s"""
+       |final long $keySectionSize = $kByteSize;
+       |final long $valueSectionSize = $vByteSize;
+       |final long $byteArraySize = 8 + $keySectionSize + $valueSectionSize;
+       |if ($byteArraySize > ${ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH}) {
+       |  ${genCodeForAnyElements(ctx, childVariable, mapData, numEntries)}
+       |} else {
+       |  final byte[] $data = new byte[(int)$byteArraySize];
+       |  UnsafeMapData $unsafeMapData = new UnsafeMapData();
+       |  Platform.putLong($data, $baseOffset, $keySectionSize);
+       |  Platform.putLong($data, $baseOffset + 8, $numEntries);
+       |  Platform.putLong($data, $baseOffset + 8 + $keySectionSize, $numEntries);
+       |  $unsafeMapData.pointTo($data, $baseOffset, (int)$byteArraySize);
+       |  ArrayData $keyArrayData = $unsafeMapData.keyArray();
+       |  ArrayData $valueArrayData = $unsafeMapData.valueArray();
+       |  $assignmentLoop
+       |  $mapData = $unsafeMapData;
+       |}
+     """.stripMargin
+  }
+
+  private def genCodeForAnyElements(
+      ctx: CodegenContext,
+      childVariable: String,
+      mapData: String,
+      numEntries: String): String = {
+    val keys = ctx.freshName("keys")
+    val values = ctx.freshName("values")
+    val mapDataClass = classOf[ArrayBasedMapData].getName()
+
+    val isValuePrimitive = CodeGenerator.isPrimitiveType(dataType.valueType)
+    val valueAssignment = (entry: String, idx: String) => {
+      val value = CodeGenerator.getValue(entry, dataType.valueType, "1")
+      if (dataType.valueContainsNull && isValuePrimitive) {
+        s"$values[$idx] = $entry.isNullAt(1) ? null : (Object)$value;"
+      } else {
+        s"$values[$idx] = $value;"
+      }
+    }
+    val keyAssignment = (key: String, idx: String) => s"$keys[$idx] = $key;"
+    val assignmentLoop = genCodeForAssignmentLoop(
+      ctx,
+      childVariable,
+      mapData,
+      numEntries,
+      keyAssignment,
+      valueAssignment)
+
+    s"""
+       |final Object[] $keys = new Object[$numEntries];
+       |final Object[] $values = new Object[$numEntries];
+       |$assignmentLoop
+       |$mapData = $mapDataClass.apply($keys, $values);
+     """.stripMargin
   }
 
   override def prettyName: String = "map_from_entries"
@@ -1428,7 +1471,7 @@ case class ArraysOverlap(left: Expression, right: Expression)
  */
 // scalastyle:off line.size.limit
 @ExpressionDescription(
-  usage = "_FUNC_(x, start, length) - Subsets array x starting from index start (or starting from the end if start is negative) with the specified length.",
+  usage = "_FUNC_(x, start, length) - Subsets array x starting from index start (array indices start at 1, or starting from the end if start is negative) with the specified length.",
   examples = """
     Examples:
       > SELECT _FUNC_(array(1, 2, 3, 4), 2, 2);
@@ -1929,8 +1972,7 @@ case class ArrayPosition(left: Expression, right: Expression)
        b
   """,
   since = "2.4.0")
-case class ElementAt(left: Expression, right: Expression)
-  extends GetMapValueUtil with GetArrayItemUtil {
+case class ElementAt(left: Expression, right: Expression) extends GetMapValueUtil {
 
   @transient private lazy val mapKeyType = left.dataType.asInstanceOf[MapType].keyType
 
@@ -1975,10 +2017,7 @@ case class ElementAt(left: Expression, right: Expression)
     }
   }
 
-  override def nullable: Boolean = left.dataType match {
-    case _: ArrayType => computeNullabilityFromArray(left, right)
-    case _: MapType => true
-  }
+  override def nullable: Boolean = true
 
   override def nullSafeEval(value: Any, ordinal: Any): Any = doElementAt(value, ordinal)
 
@@ -2632,7 +2671,7 @@ object Sequence {
         val maxEstimatedArrayLength =
           getSequenceLength(startMicros, stopMicros, intervalStepInMicros)
 
-        val stepSign = if (stopMicros > startMicros) +1 else -1
+        val stepSign = if (stopMicros >= startMicros) +1 else -1
         val exclusiveItem = stopMicros + stepSign
         val arr = new Array[T](maxEstimatedArrayLength)
         var t = startMicros
@@ -2695,7 +2734,7 @@ object Sequence {
          |
          |  $sequenceLengthCode
          |
-         |  final int $stepSign = $stopMicros > $startMicros ? +1 : -1;
+         |  final int $stepSign = $stopMicros >= $startMicros ? +1 : -1;
          |  final long $exclusiveItem = $stopMicros + $stepSign;
          |
          |  $arr = new $elemType[$arrLength];

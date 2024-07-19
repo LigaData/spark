@@ -24,7 +24,7 @@ import com.esotericsoftware.kryo.io.{Input, Output}
 
 import org.apache.spark.{SparkConf, SparkEnv, SparkException}
 import org.apache.spark.internal.config.MEMORY_OFFHEAP_ENABLED
-import org.apache.spark.memory._
+import org.apache.spark.memory.{MemoryConsumer, StaticMemoryManager, TaskMemoryManager}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical.BroadcastMode
@@ -80,6 +80,7 @@ private[execution] sealed trait HashedRelation extends KnownSizeEstimation {
    * Release any used resources.
    */
   def close(): Unit
+
 }
 
 private[execution] object HashedRelation {
@@ -94,10 +95,10 @@ private[execution] object HashedRelation {
       taskMemoryManager: TaskMemoryManager = null): HashedRelation = {
     val mm = Option(taskMemoryManager).getOrElse {
       new TaskMemoryManager(
-        new UnifiedMemoryManager(
+        new StaticMemoryManager(
           new SparkConf().set(MEMORY_OFFHEAP_ENABLED.key, "false"),
           Long.MaxValue,
-          Long.MaxValue / 2,
+          Long.MaxValue,
           1),
         0)
     }
@@ -227,10 +228,10 @@ private[joins] class UnsafeHashedRelation(
     // TODO(josh): This needs to be revisited before we merge this patch; making this change now
     // so that tests compile:
     val taskMemoryManager = new TaskMemoryManager(
-      new UnifiedMemoryManager(
+      new StaticMemoryManager(
         new SparkConf().set(MEMORY_OFFHEAP_ENABLED.key, "false"),
         Long.MaxValue,
-        Long.MaxValue / 2,
+        Long.MaxValue,
         1),
       0)
 
@@ -243,7 +244,8 @@ private[joins] class UnsafeHashedRelation(
     binaryMap = new BytesToBytesMap(
       taskMemoryManager,
       (nKeys * 1.5 + 1).toInt, // reduce hash collision
-      pageSizeBytes)
+      pageSizeBytes,
+      true)
 
     var i = 0
     var keyBuffer = new Array[Byte](1024)
@@ -274,6 +276,7 @@ private[joins] class UnsafeHashedRelation(
   override def read(kryo: Kryo, in: Input): Unit = Utils.tryOrIOException {
     read(() => in.readInt(), () => in.readLong(), in.readBytes)
   }
+
 }
 
 private[joins] object UnsafeHashedRelation {
@@ -291,7 +294,8 @@ private[joins] object UnsafeHashedRelation {
       taskMemoryManager,
       // Only 70% of the slots can be used before growing, more capacity help to reduce collision
       (sizeEstimate * 1.5 + 1).toInt,
-      pageSizeBytes)
+      pageSizeBytes,
+      true)
 
     // Create a mapping of buildKeys -> rows
     val keyGenerator = UnsafeProjection.create(key)
@@ -307,9 +311,7 @@ private[joins] object UnsafeHashedRelation {
           row.getBaseObject, row.getBaseOffset, row.getSizeInBytes)
         if (!success) {
           binaryMap.free()
-          // scalastyle:off throwerror
-          throw new SparkOutOfMemoryError("There is no enough memory to build hash map")
-          // scalastyle:on throwerror
+          throw new SparkException("There is no enough memory to build hash map")
         }
       }
     }
@@ -392,10 +394,10 @@ private[execution] final class LongToUnsafeRowMap(val mm: TaskMemoryManager, cap
   def this() = {
     this(
       new TaskMemoryManager(
-        new UnifiedMemoryManager(
+        new StaticMemoryManager(
           new SparkConf().set(MEMORY_OFFHEAP_ENABLED.key, "false"),
           Long.MaxValue,
-          Long.MaxValue / 2,
+          Long.MaxValue,
           1),
         0),
       0)
@@ -413,7 +415,7 @@ private[execution] final class LongToUnsafeRowMap(val mm: TaskMemoryManager, cap
 
   private def init(): Unit = {
     if (mm != null) {
-      require(capacity < 512000000, "Cannot broadcast 512 million or more rows")
+      require(capacity < 512000000, "Cannot broadcast more than 512 millions rows")
       var n = 1
       while (n < capacity) n *= 2
       ensureAcquireMemory(n * 2L * 8 + (1 << 20))
@@ -755,6 +757,7 @@ private[execution] final class LongToUnsafeRowMap(val mm: TaskMemoryManager, cap
   override def read(kryo: Kryo, in: Input): Unit = {
     read(() => in.readBoolean(), () => in.readLong(), in.readBytes)
   }
+
 }
 
 private[joins] class LongHashedRelation(
@@ -806,6 +809,7 @@ private[joins] class LongHashedRelation(
     resultRow = new UnsafeRow(nFields)
     map = in.readObject().asInstanceOf[LongToUnsafeRowMap]
   }
+
 }
 
 /**

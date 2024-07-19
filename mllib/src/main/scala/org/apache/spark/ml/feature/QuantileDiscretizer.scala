@@ -17,6 +17,10 @@
 
 package org.apache.spark.ml.feature
 
+import org.json4s.JsonDSL._
+import org.json4s.JValue
+import org.json4s.jackson.JsonMethods._
+
 import org.apache.spark.annotation.Since
 import org.apache.spark.internal.Logging
 import org.apache.spark.ml._
@@ -205,7 +209,7 @@ final class QuantileDiscretizer @Since("1.6.0") (@Since("1.6.0") override val ui
     if (isSet(inputCols)) {
       val splitsArray = if (isSet(numBucketsArray)) {
         val probArrayPerCol = $(numBucketsArray).map { numOfBuckets =>
-          (0 to numOfBuckets).map(_.toDouble / numOfBuckets).toArray
+          (0.0 to 1.0 by 1.0 / numOfBuckets).toArray
         }
 
         val probabilityArray = probArrayPerCol.flatten.sorted.distinct
@@ -225,12 +229,12 @@ final class QuantileDiscretizer @Since("1.6.0") (@Since("1.6.0") override val ui
         }
       } else {
         dataset.stat.approxQuantile($(inputCols),
-          (0 to $(numBuckets)).map(_.toDouble / $(numBuckets)).toArray, $(relativeError))
+          (0.0 to 1.0 by 1.0 / $(numBuckets)).toArray, $(relativeError))
       }
       bucketizer.setSplitsArray(splitsArray.map(getDistinctSplits))
     } else {
       val splits = dataset.stat.approxQuantile($(inputCol),
-        (0 to $(numBuckets)).map(_.toDouble / $(numBuckets)).toArray, $(relativeError))
+        (0.0 to 1.0 by 1.0 / $(numBuckets)).toArray, $(relativeError))
       bucketizer.setSplits(getDistinctSplits(splits))
     }
     copyValues(bucketizer.setParent(this))
@@ -239,6 +243,18 @@ final class QuantileDiscretizer @Since("1.6.0") (@Since("1.6.0") override val ui
   private def getDistinctSplits(splits: Array[Double]): Array[Double] = {
     splits(0) = Double.NegativeInfinity
     splits(splits.length - 1) = Double.PositiveInfinity
+
+    // 0.0 and -0.0 are distinct values, array.distinct will preserve both of them.
+    // but 0.0 > -0.0 is False which will break the parameter validation checking.
+    // and in scala <= 2.12, there's bug which will cause array.distinct generate
+    // non-deterministic results when array contains both 0.0 and -0.0
+    // So that here we should first normalize all 0.0 and -0.0 to be 0.0
+    // See https://github.com/scala/bug/issues/11995
+    for (i <- 0 until splits.length) {
+      if (splits(i) == -0.0) {
+        splits(i) = 0.0
+      }
+    }
     val distinctSplits = splits.distinct
     if (splits.length != distinctSplits.length) {
       log.warn(s"Some quantiles were identical. Bucketing to ${distinctSplits.length - 1}" +

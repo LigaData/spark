@@ -19,18 +19,17 @@ package org.apache.spark.sql.execution.datasources.v2
 
 import scala.collection.mutable
 
-import org.apache.spark.sql.{AnalysisException, Strategy}
-import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, AttributeSet, Expression, PredicateHelper, SubqueryExpression}
+import org.apache.spark.sql.{sources, Strategy}
+import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, AttributeSet, Expression}
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
-import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, Repartition}
+import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Repartition}
 import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SparkPlan}
 import org.apache.spark.sql.execution.datasources.DataSourceStrategy
 import org.apache.spark.sql.execution.streaming.continuous.{ContinuousCoalesceExec, WriteToContinuousDataSource, WriteToContinuousDataSourceExec}
-import org.apache.spark.sql.sources
-import org.apache.spark.sql.sources.v2.reader._
-import org.apache.spark.sql.sources.v2.reader.streaming.{ContinuousStream, MicroBatchStream}
+import org.apache.spark.sql.sources.v2.reader.{DataSourceReader, SupportsPushDownFilters, SupportsPushDownRequiredColumns}
+import org.apache.spark.sql.sources.v2.reader.streaming.ContinuousReader
 
-object DataSourceV2Strategy extends Strategy with PredicateHelper {
+object DataSourceV2Strategy extends Strategy {
 
   /**
    * Pushes down filters to the data source reader
@@ -38,9 +37,9 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
    * @return pushed filter and post-scan filters.
    */
   private def pushFilters(
-      scanBuilder: ScanBuilder,
+      reader: DataSourceReader,
       filters: Seq[Expression]): (Seq[Expression], Seq[Expression]) = {
-    scanBuilder match {
+    reader match {
       case r: SupportsPushDownFilters =>
         // A map from translated data source filters to original catalyst filter expressions.
         val translatedFilterToExpr = mutable.HashMap.empty[sources.Filter, Expression]
@@ -72,104 +71,75 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
   /**
    * Applies column pruning to the data source, w.r.t. the references of the given expressions.
    *
-   * @return the created `ScanConfig`(since column pruning is the last step of operator pushdown),
-   *         and new output attributes after column pruning.
+   * @return new output attributes after column pruning.
    */
   // TODO: nested column pruning.
   private def pruneColumns(
-      scanBuilder: ScanBuilder,
+      reader: DataSourceReader,
       relation: DataSourceV2Relation,
-      exprs: Seq[Expression]): (Scan, Seq[AttributeReference]) = {
-    scanBuilder match {
+      exprs: Seq[Expression]): Seq[AttributeReference] = {
+    reader match {
       case r: SupportsPushDownRequiredColumns =>
         val requiredColumns = AttributeSet(exprs.flatMap(_.references))
         val neededOutput = relation.output.filter(requiredColumns.contains)
         if (neededOutput != relation.output) {
           r.pruneColumns(neededOutput.toStructType)
-          val scan = r.build()
           val nameToAttr = relation.output.map(_.name).zip(relation.output).toMap
-          scan -> scan.readSchema().toAttributes.map {
+          r.readSchema().toAttributes.map {
             // We have to keep the attribute id during transformation.
             a => a.withExprId(nameToAttr(a.name).exprId)
           }
         } else {
-          r.build() -> relation.output
+          relation.output
         }
 
-      case _ => scanBuilder.build() -> relation.output
+      case _ => relation.output
     }
   }
 
-  import DataSourceV2Implicits._
 
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
     case PhysicalOperation(project, filters, relation: DataSourceV2Relation) =>
-      val scanBuilder = relation.newScanBuilder()
-
-      val normalizedFilters = DataSourceStrategy.normalizeFilters(
-        filters.filterNot(SubqueryExpression.hasSubquery), relation.output)
-
+      val reader = relation.newReader()
       // `pushedFilters` will be pushed down and evaluated in the underlying data sources.
       // `postScanFilters` need to be evaluated after the scan.
       // `postScanFilters` and `pushedFilters` can overlap, e.g. the parquet row group filter.
-      val (pushedFilters, postScanFilters) = pushFilters(scanBuilder, normalizedFilters)
-      val (scan, output) = pruneColumns(scanBuilder, relation, project ++ postScanFilters)
+      val (pushedFilters, postScanFilters) = pushFilters(reader, filters)
+      val output = pruneColumns(reader, relation, project ++ postScanFilters)
       logInfo(
         s"""
-           |Pushing operators to ${relation.name}
+           |Pushing operators to ${relation.source.getClass}
            |Pushed Filters: ${pushedFilters.mkString(", ")}
            |Post-Scan Filters: ${postScanFilters.mkString(",")}
            |Output: ${output.mkString(", ")}
          """.stripMargin)
 
-      val plan = BatchScanExec(output, scan)
+      val scan = DataSourceV2ScanExec(
+        output, relation.source, relation.options, pushedFilters, reader)
 
       val filterCondition = postScanFilters.reduceLeftOption(And)
-      val withFilter = filterCondition.map(FilterExec(_, plan)).getOrElse(plan)
+      val withFilter = filterCondition.map(FilterExec(_, scan)).getOrElse(scan)
 
       // always add the projection, which will produce unsafe rows required by some operators
       ProjectExec(project, withFilter) :: Nil
 
-    case r: StreamingDataSourceV2Relation if r.startOffset.isDefined && r.endOffset.isDefined =>
-      val microBatchStream = r.stream.asInstanceOf[MicroBatchStream]
+    case r: StreamingDataSourceV2Relation =>
       // ensure there is a projection, which will produce unsafe rows required by some operators
       ProjectExec(r.output,
-        MicroBatchScanExec(
-          r.output, r.scan, microBatchStream, r.startOffset.get, r.endOffset.get)) :: Nil
-
-    case r: StreamingDataSourceV2Relation if r.startOffset.isDefined && r.endOffset.isEmpty =>
-      val continuousStream = r.stream.asInstanceOf[ContinuousStream]
-      // ensure there is a projection, which will produce unsafe rows required by some operators
-      ProjectExec(r.output,
-        ContinuousScanExec(
-          r.output, r.scan, continuousStream, r.startOffset.get)) :: Nil
+        DataSourceV2ScanExec(r.output, r.source, r.options, r.pushedFilters, r.reader)) :: Nil
 
     case WriteToDataSourceV2(writer, query) =>
       WriteToDataSourceV2Exec(writer, planLater(query)) :: Nil
 
     case AppendData(r: DataSourceV2Relation, query, _) =>
-      AppendDataExec(r.table.asBatchWritable, r.options, planLater(query)) :: Nil
-
-    case OverwriteByExpression(r: DataSourceV2Relation, deleteExpr, query, _) =>
-      // fail if any filter cannot be converted. correctness depends on removing all matching data.
-      val filters = splitConjunctivePredicates(deleteExpr).map {
-        filter => DataSourceStrategy.translateFilter(deleteExpr).getOrElse(
-          throw new AnalysisException(s"Cannot translate expression to source filter: $filter"))
-      }.toArray
-
-      OverwriteByExpressionExec(
-        r.table.asBatchWritable, filters, r.options, planLater(query)) :: Nil
-
-    case OverwritePartitionsDynamic(r: DataSourceV2Relation, query, _) =>
-      OverwritePartitionsDynamicExec(r.table.asBatchWritable, r.options, planLater(query)) :: Nil
+      WriteToDataSourceV2Exec(r.newWriter(), planLater(query)) :: Nil
 
     case WriteToContinuousDataSource(writer, query) =>
       WriteToContinuousDataSourceExec(writer, planLater(query)) :: Nil
 
     case Repartition(1, false, child) =>
-      val isContinuous = child.find {
-        case r: StreamingDataSourceV2Relation => r.stream.isInstanceOf[ContinuousStream]
-        case _ => false
+      val isContinuous = child.collectFirst {
+        case StreamingDataSourceV2Relation(_, _, _, r: ContinuousReader) => r
       }.isDefined
 
       if (isContinuous) {

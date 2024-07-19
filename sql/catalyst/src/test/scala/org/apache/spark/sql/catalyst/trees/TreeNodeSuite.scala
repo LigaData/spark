@@ -28,15 +28,14 @@ import org.json4s.jackson.JsonMethods
 import org.json4s.jackson.JsonMethods._
 
 import org.apache.spark.SparkFunSuite
-import org.apache.spark.sql.catalyst.{FunctionIdentifier, InternalRow, TableIdentifier}
+import org.apache.spark.sql.catalyst.{AliasIdentifier, FunctionIdentifier, InternalRow, TableIdentifier}
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.dsl.expressions.DslString
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
-import org.apache.spark.sql.catalyst.plans.{LeftOuter, NaturalJoin, SQLHelper}
-import org.apache.spark.sql.catalyst.plans.logical.{LeafNode, Union}
+import org.apache.spark.sql.catalyst.plans.{LeftOuter, NaturalJoin}
+import org.apache.spark.sql.catalyst.plans.logical.{LeafNode, SubqueryAlias, Union}
 import org.apache.spark.sql.catalyst.plans.physical.{IdentityBroadcastMode, RoundRobinPartitioning, SinglePartition}
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.storage.StorageLevel
 
@@ -82,7 +81,7 @@ case class SelfReferenceUDF(
   def apply(key: String): Boolean = config.contains(key)
 }
 
-class TreeNodeSuite extends SparkFunSuite with SQLHelper {
+class TreeNodeSuite extends SparkFunSuite {
   test("top node changed") {
     val after = Literal(1) transform { case Literal(1, _) => Literal(2) }
     assert(after === Literal(2))
@@ -426,6 +425,28 @@ class TreeNodeSuite extends SparkFunSuite with SQLHelper {
         "product-class" -> JString(classOf[FunctionIdentifier].getName),
           "funcName" -> "function"))
 
+    // Converts AliasIdentifier to JSON
+    assertJSON(
+      AliasIdentifier("alias"),
+      JObject(
+        "product-class" -> JString(classOf[AliasIdentifier].getName),
+          "identifier" -> "alias"))
+
+    // Converts SubqueryAlias to JSON
+    assertJSON(
+      SubqueryAlias("t1", JsonTestTreeNode("0")),
+      List(
+        JObject(
+          "class" -> classOf[SubqueryAlias].getName,
+          "num-children" -> 1,
+          "name" -> JObject("product-class" -> JString(classOf[AliasIdentifier].getName),
+            "identifier" -> "t1"),
+          "child" -> 0),
+        JObject(
+          "class" -> classOf[JsonTestTreeNode].getName,
+          "num-children" -> 0,
+          "arg" -> "0")))
+
     // Converts BucketSpec to JSON
     assertJSON(
       BucketSpec(1, Seq("bucket"), Seq("sort")),
@@ -565,7 +586,7 @@ class TreeNodeSuite extends SparkFunSuite with SQLHelper {
   }
 
   test("toJSON should not throws java.lang.StackOverflowError") {
-    val udf = ScalaUDF(SelfReferenceUDF(), BooleanType, Seq("col1".attr), false :: Nil)
+    val udf = ScalaUDF(SelfReferenceUDF(), BooleanType, Seq("col1".attr), true :: Nil)
     // Should not throw java.lang.StackOverflowError
     udf.toJSON
   }
@@ -595,29 +616,5 @@ class TreeNodeSuite extends SparkFunSuite with SQLHelper {
     val result = before.withNewChildren(Stream(Literal(1), Literal(3)))
     val expected = Coalesce(Stream(Literal(1), Literal(3)))
     assert(result === expected)
-  }
-
-  test("treeString limits plan length") {
-    withSQLConf(SQLConf.MAX_PLAN_STRING_LENGTH.key -> "200") {
-      val ds = (1 until 20).foldLeft(Literal("TestLiteral"): Expression) { case (treeNode, x) =>
-        Add(Literal(x), treeNode)
-      }
-
-      val planString = ds.treeString
-      logWarning("Plan string: " + planString)
-      assert(planString.endsWith(" more characters"))
-      assert(planString.length <= SQLConf.get.maxPlanStringLength)
-    }
-  }
-
-  test("treeString limit at zero") {
-    withSQLConf(SQLConf.MAX_PLAN_STRING_LENGTH.key -> "0") {
-      val ds = (1 until 2).foldLeft(Literal("TestLiteral"): Expression) { case (treeNode, x) =>
-        Add(Literal(x), treeNode)
-      }
-
-      val planString = ds.treeString
-      assert(planString.startsWith("Truncated plan of"))
-    }
   }
 }

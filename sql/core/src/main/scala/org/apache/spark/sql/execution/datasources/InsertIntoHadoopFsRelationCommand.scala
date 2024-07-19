@@ -95,9 +95,7 @@ case class InsertIntoHadoopFsRelationCommand(
     val parameters = CaseInsensitiveMap(options)
 
     val partitionOverwriteMode = parameters.get("partitionOverwriteMode")
-      // scalastyle:off caselocale
       .map(mode => PartitionOverwriteMode.withName(mode.toUpperCase))
-      // scalastyle:on caselocale
       .getOrElse(sparkSession.sessionState.conf.partitionOverwriteMode)
     val enableDynamicOverwrite = partitionOverwriteMode == PartitionOverwriteMode.DYNAMIC
     // This config only makes sense when we are overwriting a partitioned dataset with dynamic
@@ -186,7 +184,7 @@ case class InsertIntoHadoopFsRelationCommand(
       // refresh cached files in FileIndex
       fileIndex.foreach(_.refresh())
       // refresh data cache if table is cached
-      sparkSession.catalog.refreshByPath(outputPath.toString)
+      sparkSession.sharedState.cacheManager.recacheByPath(sparkSession, outputPath, fs)
 
       if (catalogTable.nonEmpty) {
         CommandUtils.updateTableStats(sparkSession, catalogTable.get)

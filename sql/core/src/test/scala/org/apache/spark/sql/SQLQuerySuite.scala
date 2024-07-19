@@ -19,7 +19,7 @@ package org.apache.spark.sql
 
 import java.io.File
 import java.net.{MalformedURLException, URL}
-import java.sql.{Date, Timestamp}
+import java.sql.Timestamp
 import java.util.concurrent.atomic.AtomicBoolean
 
 import org.apache.spark.{AccumulatorSuite, SparkException}
@@ -27,6 +27,7 @@ import org.apache.spark.scheduler.{SparkListener, SparkListenerJobStart}
 import org.apache.spark.sql.catalyst.util.StringUtils
 import org.apache.spark.sql.execution.aggregate
 import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, SortAggregateExec}
+import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
 import org.apache.spark.sql.execution.datasources.FilePartition
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, CartesianProductExec, SortMergeJoinExec}
 import org.apache.spark.sql.functions._
@@ -413,32 +414,32 @@ class SQLQuerySuite extends QueryTest with SharedSQLContext {
 
     checkAnswer(sql(
       "SELECT time FROM timestamps WHERE time='1969-12-31 16:00:00.0'"),
-      Row(Timestamp.valueOf("1969-12-31 16:00:00")))
+      Row(java.sql.Timestamp.valueOf("1969-12-31 16:00:00")))
 
     checkAnswer(sql(
       "SELECT time FROM timestamps WHERE time=CAST('1969-12-31 16:00:00.001' AS TIMESTAMP)"),
-      Row(Timestamp.valueOf("1969-12-31 16:00:00.001")))
+      Row(java.sql.Timestamp.valueOf("1969-12-31 16:00:00.001")))
 
     checkAnswer(sql(
       "SELECT time FROM timestamps WHERE time='1969-12-31 16:00:00.001'"),
-      Row(Timestamp.valueOf("1969-12-31 16:00:00.001")))
+      Row(java.sql.Timestamp.valueOf("1969-12-31 16:00:00.001")))
 
     checkAnswer(sql(
       "SELECT time FROM timestamps WHERE '1969-12-31 16:00:00.001'=time"),
-      Row(Timestamp.valueOf("1969-12-31 16:00:00.001")))
+      Row(java.sql.Timestamp.valueOf("1969-12-31 16:00:00.001")))
 
     checkAnswer(sql(
       """SELECT time FROM timestamps WHERE time<'1969-12-31 16:00:00.003'
           AND time>'1969-12-31 16:00:00.001'"""),
-      Row(Timestamp.valueOf("1969-12-31 16:00:00.002")))
+      Row(java.sql.Timestamp.valueOf("1969-12-31 16:00:00.002")))
 
     checkAnswer(sql(
       """
         |SELECT time FROM timestamps
         |WHERE time IN ('1969-12-31 16:00:00.001','1969-12-31 16:00:00.002')
       """.stripMargin),
-      Seq(Row(Timestamp.valueOf("1969-12-31 16:00:00.001")),
-        Row(Timestamp.valueOf("1969-12-31 16:00:00.002"))))
+      Seq(Row(java.sql.Timestamp.valueOf("1969-12-31 16:00:00.001")),
+        Row(java.sql.Timestamp.valueOf("1969-12-31 16:00:00.002"))))
 
     checkAnswer(sql(
       "SELECT time FROM timestamps WHERE time='123'"),
@@ -548,7 +549,7 @@ class SQLQuerySuite extends QueryTest with SharedSQLContext {
   test("date row") {
     checkAnswer(sql(
       """select cast("2015-01-28" as date) from testData limit 1"""),
-      Row(Date.valueOf("2015-01-28"))
+      Row(java.sql.Date.valueOf("2015-01-28"))
     )
   }
 
@@ -1484,12 +1485,11 @@ class SQLQuerySuite extends QueryTest with SharedSQLContext {
       sql("select interval")
     }
     assert(e1.message.contains("at least one time unit should be given for interval literal"))
-
     // Currently we don't yet support nanosecond
     val e2 = intercept[AnalysisException] {
       sql("select interval 23 nanosecond")
     }
-    assert(e2.message.contains("no viable alternative at input 'interval 23 nanosecond'"))
+    assert(e2.message.contains("No interval can be constructed"))
   }
 
   test("SPARK-8945: add and subtract expressions for interval type") {
@@ -3005,13 +3005,101 @@ class SQLQuerySuite extends QueryTest with SharedSQLContext {
     }
   }
 
-  test("reset command should not fail with cache") {
-    withTable("tbl") {
-      val provider = spark.sessionState.conf.defaultDataSourceName
-      sql(s"CREATE TABLE tbl(i INT, j STRING) USING $provider")
-      sql("reset")
-      sql("cache table tbl")
-      sql("reset")
+  test("SPARK-28156: self-join should not miss cached view") {
+    withTable("table1") {
+      withView("table1_vw") {
+        val df = Seq.tabulate(5) { x => (x, x + 1, x + 2, x + 3) }.toDF("a", "b", "c", "d")
+        df.write.mode("overwrite").format("orc").saveAsTable("table1")
+        sql("drop view if exists table1_vw")
+        sql("create view table1_vw as select * from table1")
+
+        val cachedView = sql("select a, b, c, d from table1_vw")
+
+        cachedView.createOrReplaceTempView("cachedview")
+        cachedView.persist()
+
+        val queryDf = sql(
+          s"""select leftside.a, leftside.b
+             |from cachedview leftside
+             |join cachedview rightside
+             |on leftside.a = rightside.a
+           """.stripMargin)
+
+        val inMemoryTableScan = queryDf.queryExecution.executedPlan.collect {
+          case i: InMemoryTableScanExec => i
+        }
+        assert(inMemoryTableScan.size == 2)
+        checkAnswer(queryDf, Row(0, 1) :: Row(1, 2) :: Row(2, 3) :: Row(3, 4) :: Row(4, 5) :: Nil)
+      }
+    }
+
+  }
+
+  test("SPARK-29213: FilterExec should not throw NPE") {
+    withTempView("t1", "t2", "t3") {
+      sql("SELECT ''").as[String].map(identity).toDF("x").createOrReplaceTempView("t1")
+      sql("SELECT * FROM VALUES 0, CAST(NULL AS BIGINT)")
+        .as[java.lang.Long]
+        .map(identity)
+        .toDF("x")
+        .createOrReplaceTempView("t2")
+      sql("SELECT ''").as[String].map(identity).toDF("x").createOrReplaceTempView("t3")
+      sql(
+        """
+          |SELECT t1.x
+          |FROM t1
+          |LEFT JOIN (
+          |    SELECT x FROM (
+          |        SELECT x FROM t2
+          |        UNION ALL
+          |        SELECT SUBSTR(x,5) x FROM t3
+          |    ) a
+          |    WHERE LENGTH(x)>0
+          |) t3
+          |ON t1.x=t3.x
+        """.stripMargin).collect()
+    }
+  }
+
+  test("SPARK-29682: Conflicting attributes in Expand are resolved") {
+    val numsDF = Seq(1, 2, 3).toDF("nums")
+    val cubeDF = numsDF.cube("nums").agg(max(lit(0)).as("agcol"))
+
+    checkAnswer(
+      cubeDF.join(cubeDF, "nums"),
+      Row(1, 0, 0) :: Row(2, 0, 0) :: Row(3, 0, 0) :: Nil)
+  }
+
+  test("SPARK-30447: fix constant propagation inside NOT") {
+    withTempView("t") {
+      Seq[Integer](1, null).toDF("c").createOrReplaceTempView("t")
+      val df = sql("SELECT * FROM t WHERE NOT(c = 1 AND c + 1 = 1)")
+
+      checkAnswer(df, Row(1))
+    }
+  }
+
+  test("SPARK-32372: ResolveReferences.dedupRight should only rewrite attributes for ancestor " +
+    "plans of the conflict plan") {
+    sql("SELECT name, avg(age) as avg_age FROM person GROUP BY name")
+      .createOrReplaceTempView("person_a")
+    sql("SELECT p1.name, p2.avg_age FROM person p1 JOIN person_a p2 ON p1.name = p2.name")
+      .createOrReplaceTempView("person_b")
+    sql("SELECT * FROM person_a UNION SELECT * FROM person_b")
+      .createOrReplaceTempView("person_c")
+    checkAnswer(
+      sql("SELECT p1.name, p2.avg_age FROM person_c p1 JOIN person_c p2 ON p1.name = p2.name"),
+      Row("jim", 20.0) :: Row("mike", 30.0) :: Nil)
+  }
+
+  test("SPARK-32280: Avoid duplicate rewrite attributes when there're multiple JOINs") {
+    withSQLConf(SQLConf.CROSS_JOINS_ENABLED.key -> "true") {
+      sql("SELECT 1 AS id").createOrReplaceTempView("A")
+      sql("SELECT id, 'foo' AS kind FROM A").createOrReplaceTempView("B")
+      sql("SELECT l.id as id FROM B AS l LEFT SEMI JOIN B AS r ON l.kind = r.kind")
+        .createOrReplaceTempView("C")
+      checkAnswer(sql("SELECT 0 FROM ( SELECT * FROM B JOIN C USING (id)) " +
+        "JOIN ( SELECT * FROM B JOIN C USING (id)) USING (id)"), Row(0))
     }
   }
 }

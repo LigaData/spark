@@ -71,15 +71,15 @@ class SQLConfEntrySuite extends SparkFunSuite {
     assert(conf.getConf(confEntry, false) === false)
 
     conf.setConf(confEntry, true)
-    assert(conf.getConf(confEntry, false))
+    assert(conf.getConf(confEntry, false) === true)
 
     conf.setConfString(key, "true")
     assert(conf.getConfString(key, "false") === "true")
     assert(conf.getConfString(key) === "true")
-    assert(conf.getConf(confEntry, false))
+    assert(conf.getConf(confEntry, false) === true)
 
     conf.setConfString(key, " true ")
-    assert(conf.getConf(confEntry, false))
+    assert(conf.getConf(confEntry, false) === true)
     val e = intercept[IllegalArgumentException] {
       conf.setConfString(key, "abc")
     }

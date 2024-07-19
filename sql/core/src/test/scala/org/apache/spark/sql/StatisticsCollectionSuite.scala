@@ -17,16 +17,14 @@
 
 package org.apache.spark.sql
 
-import java.io.File
-import java.util.TimeZone
-import java.util.concurrent.TimeUnit
+import java.io.{File, PrintWriter}
+import java.net.URI
 
 import scala.collection.mutable
 
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.CatalogColumnStat
 import org.apache.spark.sql.catalyst.plans.logical._
-import org.apache.spark.sql.catalyst.util.{DateTimeTestUtils, DateTimeUtils}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.test.SQLTestData.ArrayData
@@ -230,17 +228,18 @@ class StatisticsCollectionSuite extends StatisticsCollectionTestBase with Shared
       BigInt(0) -> (("0.0 B", "0")),
       BigInt(100) -> (("100.0 B", "100")),
       BigInt(2047) -> (("2047.0 B", "2.05E+3")),
-      BigInt(2048) -> (("2.0 KiB", "2.05E+3")),
-      BigInt(3333333) -> (("3.2 MiB", "3.33E+6")),
-      BigInt(4444444444L) -> (("4.1 GiB", "4.44E+9")),
-      BigInt(5555555555555L) -> (("5.1 TiB", "5.56E+12")),
-      BigInt(6666666666666666L) -> (("5.9 PiB", "6.67E+15")),
-      BigInt(1L << 10 ) * (1L << 60) -> (("1024.0 EiB", "1.18E+21")),
+      BigInt(2048) -> (("2.0 KB", "2.05E+3")),
+      BigInt(3333333) -> (("3.2 MB", "3.33E+6")),
+      BigInt(4444444444L) -> (("4.1 GB", "4.44E+9")),
+      BigInt(5555555555555L) -> (("5.1 TB", "5.56E+12")),
+      BigInt(6666666666666666L) -> (("5.9 PB", "6.67E+15")),
+      BigInt(1L << 10 ) * (1L << 60) -> (("1024.0 EB", "1.18E+21")),
       BigInt(1L << 11) * (1L << 60) -> (("2.36E+21 B", "2.36E+21"))
     )
     numbers.foreach { case (input, (expectedSize, expectedRows)) =>
       val stats = Statistics(sizeInBytes = input, rowCount = Some(input))
-      val expectedString = s"sizeInBytes=$expectedSize, rowCount=$expectedRows"
+      val expectedString = s"sizeInBytes=$expectedSize, rowCount=$expectedRows," +
+        s" hints=none"
       assert(stats.simpleString == expectedString)
     }
   }
@@ -331,6 +330,26 @@ class StatisticsCollectionSuite extends StatisticsCollectionTestBase with Shared
 
           // check that tableRelationCache inside the catalog was invalidated after insert
           assert(!isTableInCatalogCache(table))
+        }
+      }
+    }
+  }
+
+  test("auto gather stats after insert command") {
+    val table = "change_stats_insert_datasource_table"
+    Seq(false, true).foreach { autoUpdate =>
+      withSQLConf(SQLConf.AUTO_SIZE_UPDATE_ENABLED.key -> autoUpdate.toString) {
+        withTable(table) {
+          sql(s"CREATE TABLE $table (i int, j string) USING PARQUET")
+          // insert into command
+          sql(s"INSERT INTO TABLE $table SELECT 1, 'abc'")
+          val stats = getCatalogTable(table).stats
+          if (autoUpdate) {
+            assert(stats.isDefined)
+            assert(stats.get.sizeInBytes >= 0)
+          } else {
+            assert(stats.isEmpty)
+          }
         }
       }
     }
@@ -431,42 +450,37 @@ class StatisticsCollectionSuite extends StatisticsCollectionTestBase with Shared
     }
   }
 
-  test("store and retrieve column stats in different time zones") {
-    val (start, end) = (0, TimeUnit.DAYS.toSeconds(2))
+  test("Metadata files and temporary files should not be counted as data files") {
+    withTempDir { tempDir =>
+      val tableName = "t1"
+      val stagingDirName = ".test-staging-dir"
+      val tableLocation = s"${tempDir.toURI}/$tableName"
+      withSQLConf(
+        SQLConf.AUTO_SIZE_UPDATE_ENABLED.key -> "true",
+        "hive.exec.stagingdir" -> stagingDirName) {
+        withTable("t1") {
+          sql(s"CREATE TABLE $tableName(c1 BIGINT) USING PARQUET LOCATION '$tableLocation'")
+          sql(s"INSERT INTO TABLE $tableName VALUES(1)")
 
-    def checkTimestampStats(
-        t: DataType,
-        srcTimeZone: TimeZone,
-        dstTimeZone: TimeZone)(checker: ColumnStat => Unit): Unit = {
-      val table = "time_table"
-      val column = "T"
-      val original = TimeZone.getDefault
-      try {
-        withTable(table) {
-          TimeZone.setDefault(srcTimeZone)
-          spark.range(start, end)
-            .select('id.cast(TimestampType).cast(t).as(column))
-            .write.saveAsTable(table)
-          sql(s"ANALYZE TABLE $table COMPUTE STATISTICS FOR COLUMNS $column")
+          val staging = new File(new URI(s"$tableLocation/$stagingDirName"))
+          Utils.tryWithResource(new PrintWriter(staging)) { stagingWriter =>
+            stagingWriter.write("12")
+          }
 
-          TimeZone.setDefault(dstTimeZone)
-          val stats = getCatalogTable(table)
-            .stats.get.colStats(column).toPlanStat(column, t)
-          checker(stats)
+          val metadata = new File(new URI(s"$tableLocation/_metadata"))
+          Utils.tryWithResource(new PrintWriter(metadata)) { metadataWriter =>
+            metadataWriter.write("1234")
+          }
+
+          sql(s"INSERT INTO TABLE $tableName VALUES(1)")
+
+          val stagingFileSize = staging.length()
+          val metadataFileSize = metadata.length()
+          val tableLocationSize = getDataSize(new File(new URI(tableLocation)))
+
+          val stats = checkTableStats(tableName, hasSizeInBytes = true, expectedRowCounts = None)
+          assert(stats.get.sizeInBytes === tableLocationSize - stagingFileSize - metadataFileSize)
         }
-      } finally {
-        TimeZone.setDefault(original)
-      }
-    }
-
-    DateTimeTestUtils.outstandingTimezones.foreach { timeZone =>
-      checkTimestampStats(DateType, DateTimeUtils.TimeZoneUTC, timeZone) { stats =>
-        assert(stats.min.get.asInstanceOf[Int] == TimeUnit.SECONDS.toDays(start))
-        assert(stats.max.get.asInstanceOf[Int] == TimeUnit.SECONDS.toDays(end - 1))
-      }
-      checkTimestampStats(TimestampType, DateTimeUtils.TimeZoneUTC, timeZone) { stats =>
-        assert(stats.min.get.asInstanceOf[Long] == TimeUnit.SECONDS.toMicros(start))
-        assert(stats.max.get.asInstanceOf[Long] == TimeUnit.SECONDS.toMicros(end - 1))
       }
     }
   }

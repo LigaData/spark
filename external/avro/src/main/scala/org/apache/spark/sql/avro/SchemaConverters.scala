@@ -70,8 +70,6 @@ object SchemaConverters {
 
       case ENUM => SchemaType(StringType, nullable = false)
 
-      case NULL => SchemaType(NullType, nullable = true)
-
       case RECORD =>
         if (existingRecordNames.contains(avroSchema.getFullName)) {
           throw new IncompatibleSchemaException(s"""
@@ -153,7 +151,6 @@ object SchemaConverters {
       case FloatType => builder.floatType()
       case DoubleType => builder.doubleType()
       case StringType => builder.stringType()
-      case NullType => builder.nullType()
       case d: DecimalType =>
         val avroType = LogicalTypes.decimal(d.precision, d.scale)
         val fixedSize = minBytesForPrecision(d.precision)
@@ -184,7 +181,7 @@ object SchemaConverters {
       // This should never happen.
       case other => throw new IncompatibleSchemaException(s"Unexpected type $other.")
     }
-    if (nullable && catalystType != NullType) {
+    if (nullable) {
       Schema.createUnion(schema, nullSchema)
     } else {
       schema

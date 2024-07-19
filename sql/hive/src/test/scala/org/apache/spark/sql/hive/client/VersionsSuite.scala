@@ -38,7 +38,7 @@ import org.apache.spark.sql.hive.{HiveExternalCatalog, HiveUtils}
 import org.apache.spark.sql.hive.test.TestHiveVersion
 import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.tags.ExtendedHiveTest
+import org.apache.spark.tags.{ExtendedHiveTest, SlowHiveTest}
 import org.apache.spark.util.{MutableURLClassLoader, Utils}
 
 /**
@@ -48,12 +48,22 @@ import org.apache.spark.util.{MutableURLClassLoader, Utils}
  * is not fully tested.
  */
 // TODO: Refactor this to `HiveClientSuite` and make it a subclass of `HiveVersionSuite`
+@SlowHiveTest
 @ExtendedHiveTest
 class VersionsSuite extends SparkFunSuite with Logging {
 
   override protected val enableAutoThreadAudit = false
 
   import HiveClientBuilder.buildClient
+
+  /**
+   * Creates a temporary directory, which is then passed to `f` and will be deleted after `f`
+   * returns.
+   */
+  protected def withTempDir(f: File => Unit): Unit = {
+    val dir = Utils.createTempDir().getCanonicalFile
+    try f(dir) finally Utils.deleteRecursively(dir)
+  }
 
   /**
    * Drops table `tableName` after calling `f`.
@@ -119,7 +129,7 @@ class VersionsSuite extends SparkFunSuite with Logging {
       // hive.metastore.schema.verification from false to true since 2.0
       // For details, see the JIRA HIVE-6113 and HIVE-12463
       if (version == "2.0" || version == "2.1" || version == "2.2" || version == "2.3" ||
-          version == "3.1") {
+        version == "3.1") {
         hadoopConf.set("datanucleus.schema.autoCreateAll", "true")
         hadoopConf.set("hive.metastore.schema.verification", "false")
       }
@@ -183,7 +193,7 @@ class VersionsSuite extends SparkFunSuite with Logging {
     }
 
     test(s"$version: databaseExists") {
-      assert(client.databaseExists("default"))
+      assert(client.databaseExists("default") == true)
       assert(client.databaseExists("nonexist") == false)
     }
 
@@ -198,7 +208,7 @@ class VersionsSuite extends SparkFunSuite with Logging {
     }
 
     test(s"$version: dropDatabase") {
-      assert(client.databaseExists("temporary"))
+      assert(client.databaseExists("temporary") == true)
       client.dropDatabase("temporary", ignoreIfNotExists = false, cascade = true)
       assert(client.databaseExists("temporary") == false)
     }
@@ -492,7 +502,7 @@ class VersionsSuite extends SparkFunSuite with Logging {
         // Hive 0.12 doesn't allow customized permanent functions
         assert(client.functionExists("default", "func1") == false)
       } else {
-        assert(client.functionExists("default", "func1"))
+        assert(client.functionExists("default", "func1") == true)
       }
     }
 
@@ -504,7 +514,7 @@ class VersionsSuite extends SparkFunSuite with Logging {
         }
       } else {
         client.renameFunction("default", "func1", "func2")
-        assert(client.functionExists("default", "func2"))
+        assert(client.functionExists("default", "func2") == true)
       }
     }
 

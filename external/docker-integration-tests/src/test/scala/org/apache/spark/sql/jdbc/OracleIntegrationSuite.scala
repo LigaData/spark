@@ -154,7 +154,7 @@ class OracleIntegrationSuite extends DockerJDBCIntegrationSuite with SharedSQLCo
     // A value with fractions from DECIMAL(3, 2) is correct:
     assert(row.getDecimal(1).compareTo(BigDecimal.valueOf(1.23)) == 0)
     // A value > Int.MaxValue from DECIMAL(10) is correct:
-    assert(row.getDecimal(2).compareTo(BigDecimal.valueOf(9999999999L)) == 0)
+    assert(row.getDecimal(2).compareTo(BigDecimal.valueOf(9999999999l)) == 0)
   }
 
 
@@ -481,5 +481,33 @@ class OracleIntegrationSuite extends DockerJDBCIntegrationSuite with SharedSQLCo
           """"T" >= '2018-07-15 20:50:32.5'"""))
     }
     assert(df2.collect.toSet === expectedResult)
+  }
+
+  test("query JDBC option") {
+    val expectedResult = Set(
+      (1, "1991-11-09", "1996-01-01 01:23:45")
+    ).map { case (id, date, timestamp) =>
+      Row(BigDecimal.valueOf(id), Date.valueOf(date), Timestamp.valueOf(timestamp))
+    }
+
+    val query = "SELECT id, d, t FROM datetime WHERE id = 1"
+    // query option to pass on the query string.
+    val df = spark.read.format("jdbc")
+      .option("url", jdbcUrl)
+      .option("query", query)
+      .option("oracle.jdbc.mapDateToTimestamp", "false")
+      .load()
+    assert(df.collect.toSet === expectedResult)
+
+    // query option in the create table path.
+    sql(
+      s"""
+         |CREATE OR REPLACE TEMPORARY VIEW queryOption
+         |USING org.apache.spark.sql.jdbc
+         |OPTIONS (url '$jdbcUrl',
+         |   query '$query',
+         |   oracle.jdbc.mapDateToTimestamp false)
+       """.stripMargin.replaceAll("\n", " "))
+    assert(sql("select id, d, t from queryOption").collect.toSet == expectedResult)
   }
 }

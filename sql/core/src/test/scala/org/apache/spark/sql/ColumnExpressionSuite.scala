@@ -17,7 +17,6 @@
 
 package org.apache.spark.sql
 
-import java.sql.Date
 import java.util.Locale
 
 import scala.collection.JavaConverters._
@@ -26,12 +25,12 @@ import org.apache.hadoop.io.{LongWritable, Text}
 import org.apache.hadoop.mapreduce.lib.input.{TextInputFormat => NewTextInputFormat}
 import org.scalatest.Matchers._
 
-import org.apache.spark.sql.catalyst.expressions.NamedExpression
+import org.apache.spark.sql.catalyst.expressions.{In, InSet, Literal, NamedExpression}
 import org.apache.spark.sql.execution.ProjectExec
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.types._
+import org.apache.spark.unsafe.types.UTF8String
 
 class ColumnExpressionSuite extends QueryTest with SharedSQLContext {
   import testImplicits._
@@ -415,43 +414,6 @@ class ColumnExpressionSuite extends QueryTest with SharedSQLContext {
       }
   }
 
-  test("IN/INSET with bytes, shorts, ints, dates") {
-    def check(): Unit = {
-      val values = Seq(
-        (Byte.MinValue, Some(Short.MinValue), Int.MinValue, Date.valueOf("2017-01-01")),
-        (Byte.MaxValue, None, Int.MaxValue, null))
-      val df = values.toDF("b", "s", "i", "d")
-      checkAnswer(df.select($"b".isin(Byte.MinValue, Byte.MaxValue)), Seq(Row(true), Row(true)))
-      checkAnswer(df.select($"b".isin(-1.toByte, 2.toByte)), Seq(Row(false), Row(false)))
-      checkAnswer(df.select($"s".isin(Short.MinValue, 1.toShort)), Seq(Row(true), Row(null)))
-      checkAnswer(df.select($"s".isin(0.toShort, null)), Seq(Row(null), Row(null)))
-      checkAnswer(df.select($"i".isin(0, Int.MinValue)), Seq(Row(true), Row(false)))
-      checkAnswer(df.select($"i".isin(null, Int.MinValue)), Seq(Row(true), Row(null)))
-      checkAnswer(
-        df.select($"d".isin(Date.valueOf("1950-01-01"), Date.valueOf("2017-01-01"))),
-        Seq(Row(true), Row(null)))
-      checkAnswer(
-        df.select($"d".isin(Date.valueOf("1950-01-01"), null)),
-        Seq(Row(null), Row(null)))
-    }
-
-    withSQLConf(SQLConf.OPTIMIZER_INSET_CONVERSION_THRESHOLD.key -> "10") {
-      check()
-    }
-
-    withSQLConf(
-      SQLConf.OPTIMIZER_INSET_CONVERSION_THRESHOLD.key -> "0",
-      SQLConf.OPTIMIZER_INSET_SWITCH_THRESHOLD.key -> "0") {
-      check()
-    }
-
-    withSQLConf(
-      SQLConf.OPTIMIZER_INSET_CONVERSION_THRESHOLD.key -> "0",
-      SQLConf.OPTIMIZER_INSET_SWITCH_THRESHOLD.key -> "20") {
-      check()
-    }
-  }
-
   test("isInCollection: Scala Collection") {
     val df = Seq((1, "x"), (2, "y"), (3, "z")).toDF("a", "b")
     // Test with different types of collections
@@ -544,7 +506,7 @@ class ColumnExpressionSuite extends QueryTest with SharedSQLContext {
   test("upper") {
     checkAnswer(
       lowerCaseData.select(upper('l)),
-      ('a' to 'd').map(c => Row(c.toString.toUpperCase(Locale.ROOT)))
+      ('a' to 'd').map(c => Row(c.toString.toUpperCase))
     )
 
     checkAnswer(
@@ -565,7 +527,7 @@ class ColumnExpressionSuite extends QueryTest with SharedSQLContext {
   test("lower") {
     checkAnswer(
       upperCaseData.select(lower('L)),
-      ('A' to 'F').map(c => Row(c.toString.toLowerCase(Locale.ROOT)))
+      ('A' to 'F').map(c => Row(c.toString.toLowerCase))
     )
 
     checkAnswer(
@@ -857,5 +819,10 @@ class ColumnExpressionSuite extends QueryTest with SharedSQLContext {
     checkAnswer(
       df.select(typedLit(("a", 2, 1.0))),
       Row(Row("a", 2, 1.0)) :: Nil)
+  }
+
+  test("SPARK-31563: sql of InSet for UTF8String collection") {
+    val inSet = InSet(Literal("a"), Set("a", "b").map(UTF8String.fromString))
+    assert(inSet.sql === "('a' IN ('a', 'b'))")
   }
 }

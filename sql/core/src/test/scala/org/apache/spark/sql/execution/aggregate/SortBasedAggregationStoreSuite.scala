@@ -39,11 +39,7 @@ class SortBasedAggregationStoreSuite  extends SparkFunSuite with LocalSparkConte
       new TaskContextImpl(0, 0, 0, 0, 0, taskManager, new Properties, null))
   }
 
-  override def afterAll(): Unit = try {
-    TaskContext.unset()
-  } finally {
-    super.afterAll()
-  }
+  override def afterAll(): Unit = TaskContext.unset()
 
   private val rand = new java.util.Random()
 

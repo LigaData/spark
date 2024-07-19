@@ -40,7 +40,7 @@ abstract class StringRegexExpression extends BinaryExpression
 
   // try cache the pattern for Literal
   private lazy val cache: Pattern = right match {
-    case x @ Literal(value: String, StringType) => compile(value)
+    case Literal(value: UTF8String, StringType) => compile(value.toString)
     case _ => null
   }
 
@@ -101,7 +101,8 @@ abstract class StringRegexExpression extends BinaryExpression
   """,
   note = """
     Use RLIKE to match with standard regular expressions.
-  """)
+  """,
+  since = "1.0.0")
 case class Like(left: Expression, right: Expression) extends StringRegexExpression {
 
   override def escape(v: String): String = StringUtils.escapeLikeRegex(v)
@@ -157,7 +158,7 @@ case class Like(left: Expression, right: Expression) extends StringRegexExpressi
   arguments = """
     Arguments:
       * str - a string expression
-      * regexp - a string expression. The regex string should be a Java regular expression.
+      * regexp - a string expression. The pattern string should be a Java regular expression.
 
           Since Spark 2.0, string literals (including regex patterns) are unescaped in our SQL
           parser. For example, to match "\abc", a regular expression for `regexp` can be
@@ -179,7 +180,8 @@ case class Like(left: Expression, right: Expression) extends StringRegexExpressi
   """,
   note = """
     Use LIKE to match with simple string pattern.
-  """)
+  """,
+  since = "1.0.0")
 case class RLike(left: Expression, right: Expression) extends StringRegexExpression {
 
   override def escape(v: String): String = v
@@ -229,53 +231,34 @@ case class RLike(left: Expression, right: Expression) extends StringRegexExpress
 
 
 /**
- * Splits str around matches of the given regex.
+ * Splits str around pat (pattern is a regular expression).
  */
 @ExpressionDescription(
-  usage = "_FUNC_(str, regex, limit) - Splits `str` around occurrences that match `regex`" +
-    " and returns an array with a length of at most `limit`",
-  arguments = """
-    Arguments:
-      * str - a string expression to split.
-      * regex - a string representing a regular expression. The regex string should be a
-        Java regular expression.
-      * limit - an integer expression which controls the number of times the regex is applied.
-          * limit > 0: The resulting array's length will not be more than `limit`,
-            and the resulting array's last entry will contain all input
-            beyond the last matched regex.
-          * limit <= 0: `regex` will be applied as many times as possible, and
-            the resulting array can be of any size.
-  """,
+  usage = "_FUNC_(str, regex) - Splits `str` around occurrences that match `regex`.",
   examples = """
     Examples:
       > SELECT _FUNC_('oneAtwoBthreeC', '[ABC]');
        ["one","two","three",""]
-      > SELECT _FUNC_('oneAtwoBthreeC', '[ABC]', -1);
-       ["one","two","three",""]
-      > SELECT _FUNC_('oneAtwoBthreeC', '[ABC]', 2);
-       ["one","twoBthreeC"]
-  """)
-case class StringSplit(str: Expression, regex: Expression, limit: Expression)
-  extends TernaryExpression with ImplicitCastInputTypes {
+  """,
+  since = "1.5.0")
+case class StringSplit(str: Expression, pattern: Expression)
+  extends BinaryExpression with ImplicitCastInputTypes {
 
+  override def left: Expression = str
+  override def right: Expression = pattern
   override def dataType: DataType = ArrayType(StringType)
-  override def inputTypes: Seq[DataType] = Seq(StringType, StringType, IntegerType)
-  override def children: Seq[Expression] = str :: regex :: limit :: Nil
+  override def inputTypes: Seq[DataType] = Seq(StringType, StringType)
 
-  def this(exp: Expression, regex: Expression) = this(exp, regex, Literal(-1));
-
-  override def nullSafeEval(string: Any, regex: Any, limit: Any): Any = {
-    val strings = string.asInstanceOf[UTF8String].split(
-      regex.asInstanceOf[UTF8String], limit.asInstanceOf[Int])
+  override def nullSafeEval(string: Any, regex: Any): Any = {
+    val strings = string.asInstanceOf[UTF8String].split(regex.asInstanceOf[UTF8String], -1)
     new GenericArrayData(strings.asInstanceOf[Array[Any]])
   }
 
   override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
     val arrayClass = classOf[GenericArrayData].getName
-    nullSafeCodeGen(ctx, ev, (str, regex, limit) => {
+    nullSafeCodeGen(ctx, ev, (str, pattern) =>
       // Array in java is covariant, so we don't need to cast UTF8String[] to Object[].
-      s"""${ev.value} = new $arrayClass($str.split($regex,$limit));""".stripMargin
-    })
+      s"""${ev.value} = new $arrayClass($str.split($pattern, -1));""")
   }
 
   override def prettyName: String = "split"
@@ -294,7 +277,8 @@ case class StringSplit(str: Expression, regex: Expression, limit: Expression)
     Examples:
       > SELECT _FUNC_('100-200', '(\\d+)', 'num');
        num-num
-  """)
+  """,
+  since = "1.5.0")
 // scalastyle:on line.size.limit
 case class RegExpReplace(subject: Expression, regexp: Expression, rep: Expression)
   extends TernaryExpression with ImplicitCastInputTypes {
@@ -382,6 +366,15 @@ case class RegExpReplace(subject: Expression, regexp: Expression, rep: Expressio
   }
 }
 
+object RegExpExtract {
+  def checkGroupIndex(groupCount: Int, groupIndex: Int): Unit = {
+    if (groupCount < groupIndex) {
+      throw new IllegalArgumentException(
+        s"Regex group count is $groupCount, but the specified group index is $groupIndex")
+    }
+  }
+}
+
 /**
  * Extract a specific(idx) group identified by a Java regex.
  *
@@ -393,7 +386,8 @@ case class RegExpReplace(subject: Expression, regexp: Expression, rep: Expressio
     Examples:
       > SELECT _FUNC_('100-200', '(\\d+)-(\\d+)', 1);
        100
-  """)
+  """,
+  since = "1.5.0")
 case class RegExpExtract(subject: Expression, regexp: Expression, idx: Expression)
   extends TernaryExpression with ImplicitCastInputTypes {
   def this(s: Expression, r: Expression) = this(s, r, Literal(1))
@@ -412,7 +406,9 @@ case class RegExpExtract(subject: Expression, regexp: Expression, idx: Expressio
     val m = pattern.matcher(s.toString)
     if (m.find) {
       val mr: MatchResult = m.toMatchResult
-      val group = mr.group(r.asInstanceOf[Int])
+      val index = r.asInstanceOf[Int]
+      RegExpExtract.checkGroupIndex(mr.groupCount, index)
+      val group = mr.group(index)
       if (group == null) { // Pattern matched, but not optional group
         UTF8String.EMPTY_UTF8
       } else {
@@ -430,6 +426,7 @@ case class RegExpExtract(subject: Expression, regexp: Expression, idx: Expressio
 
   override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
     val classNamePattern = classOf[Pattern].getCanonicalName
+    val classNameRegExpExtract = classOf[RegExpExtract].getCanonicalName
     val matcher = ctx.freshName("matcher")
     val matchResult = ctx.freshName("matchResult")
 
@@ -453,6 +450,7 @@ case class RegExpExtract(subject: Expression, regexp: Expression, idx: Expressio
         $termPattern.matcher($subject.toString());
       if ($matcher.find()) {
         java.util.regex.MatchResult $matchResult = $matcher.toMatchResult();
+        $classNameRegExpExtract.checkGroupIndex($matchResult.groupCount(), $idx);
         if ($matchResult.group($idx) == null) {
           ${ev.value} = UTF8String.EMPTY_UTF8;
         } else {

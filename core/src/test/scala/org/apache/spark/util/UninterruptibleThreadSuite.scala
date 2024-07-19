@@ -56,7 +56,7 @@ class UninterruptibleThreadSuite extends SparkFunSuite {
     t.interrupt()
     t.join()
     assert(hasInterruptedException === false)
-    assert(interruptStatusBeforeExit)
+    assert(interruptStatusBeforeExit === true)
   }
 
   test("interrupt before runUninterruptibly runs") {
@@ -80,7 +80,7 @@ class UninterruptibleThreadSuite extends SparkFunSuite {
     interruptLatch.countDown()
     t.join()
     assert(hasInterruptedException === false)
-    assert(interruptStatusBeforeExit)
+    assert(interruptStatusBeforeExit === true)
   }
 
   test("nested runUninterruptibly") {
@@ -112,7 +112,7 @@ class UninterruptibleThreadSuite extends SparkFunSuite {
     interruptLatch.countDown()
     t.join()
     assert(hasInterruptedException === false)
-    assert(interruptStatusBeforeExit)
+    assert(interruptStatusBeforeExit === true)
   }
 
   test("stress test") {

@@ -17,7 +17,10 @@
 
 package org.apache.spark.sql.catalyst.analysis
 
+import scala.beans.{BeanInfo, BeanProperty}
+
 import org.apache.spark.sql.AnalysisException
+import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.dsl.expressions._
 import org.apache.spark.sql.catalyst.dsl.plans._
 import org.apache.spark.sql.catalyst.expressions._
@@ -28,9 +31,8 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, GenericArrayData, MapData}
 import org.apache.spark.sql.types._
 
-private[sql] case class GroupableData(data: Int) {
-  def getData: Int = data
-}
+@BeanInfo
+private[sql] case class GroupableData(@BeanProperty data: Int)
 
 private[sql] class GroupableUDT extends UserDefinedType[GroupableData] {
 
@@ -49,9 +51,8 @@ private[sql] class GroupableUDT extends UserDefinedType[GroupableData] {
   private[spark] override def asNullable: GroupableUDT = this
 }
 
-private[sql] case class UngroupableData(data: Map[Int, Int]) {
-  def getData: Map[Int, Int] = data
-}
+@BeanInfo
+private[sql] case class UngroupableData(@BeanProperty data: Map[Int, Int])
 
 private[sql] class UngroupableUDT extends UserDefinedType[UngroupableData] {
 
@@ -394,6 +395,25 @@ class AnalysisErrorSuite extends AnalysisTest {
   )
 
   errorTest(
+    "SPARK-30998: unsupported nested inner generators",
+    {
+      val nestedListRelation = LocalRelation(
+        AttributeReference("nestedList", ArrayType(ArrayType(IntegerType)))())
+      nestedListRelation.select(Explode(Explode($"nestedList")))
+    },
+    "Generators are not supported when it's nested in expressions, but got: " +
+      "explode(explode(nestedList))" :: Nil
+  )
+
+  errorTest(
+    "SPARK-30998: unsupported nested inner generators for aggregates",
+    testRelation.select(Explode(Explode(
+      CreateArray(CreateArray(min($"a") :: max($"a") :: Nil) :: Nil)))),
+    "Generators are not supported when it's nested in expressions, but got: " +
+      "explode(explode(array(array(min(a), max(a)))))" :: Nil
+  )
+
+  errorTest(
     "generator appears in operator which is not Project",
     listRelation.sortBy(Explode('list).asc),
     "Generators are not supported outside the SELECT clause, but got: Sort" :: Nil
@@ -443,7 +463,7 @@ class AnalysisErrorSuite extends AnalysisTest {
   }
 
   test("error test for self-join") {
-    val join = Join(testRelation, testRelation, Cross, None, JoinHint.NONE)
+    val join = Join(testRelation, testRelation, Cross, None)
     val error = intercept[AnalysisException] {
       SimpleAnalyzer.checkAnalysis(join)
     }
@@ -565,8 +585,7 @@ class AnalysisErrorSuite extends AnalysisTest {
           LocalRelation(b),
           Filter(EqualTo(UnresolvedAttribute("a"), c), LocalRelation(c)),
           LeftOuter,
-          Option(EqualTo(b, c)),
-          JoinHint.NONE)),
+          Option(EqualTo(b, c)))),
       LocalRelation(a))
     assertAnalysisError(plan1, "Accessing outer query column is not allowed in" :: Nil)
 
@@ -576,8 +595,7 @@ class AnalysisErrorSuite extends AnalysisTest {
           Filter(EqualTo(UnresolvedAttribute("a"), c), LocalRelation(c)),
           LocalRelation(b),
           RightOuter,
-          Option(EqualTo(b, c)),
-          JoinHint.NONE)),
+          Option(EqualTo(b, c)))),
       LocalRelation(a))
     assertAnalysisError(plan2, "Accessing outer query column is not allowed in" :: Nil)
 
@@ -603,5 +621,16 @@ class AnalysisErrorSuite extends AnalysisTest {
       LocalRelation(a))
     assertAnalysisError(plan5,
                         "Accessing outer query column is not allowed in" :: Nil)
+  }
+
+  test("SPARK-30811: CTE should not cause stack overflow when " +
+       "it refers to non-existent table with same name") {
+    val plan = With(
+      UnresolvedRelation(TableIdentifier("t")),
+      Seq("t" -> SubqueryAlias("t",
+        Project(
+          Alias(Literal(1), "x")() :: Nil,
+          UnresolvedRelation(TableIdentifier("t", Option("nonexist")))))))
+    assertAnalysisError(plan, "Table or view not found:" :: Nil)
   }
 }

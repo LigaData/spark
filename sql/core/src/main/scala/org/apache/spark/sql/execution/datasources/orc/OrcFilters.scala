@@ -17,6 +17,7 @@
 
 package org.apache.spark.sql.execution.datasources.orc
 
+import org.apache.orc.storage.common.`type`.HiveDecimal
 import org.apache.orc.storage.ql.io.sarg.{PredicateLeaf, SearchArgument}
 import org.apache.orc.storage.ql.io.sarg.SearchArgument.Builder
 import org.apache.orc.storage.ql.io.sarg.SearchArgumentFactory.newBuilder
@@ -82,22 +83,20 @@ private[sql] object OrcFilters {
    */
   def createFilter(schema: StructType, filters: Seq[Filter]): Option[SearchArgument] = {
     val dataTypeMap = schema.map(f => f.name -> f.dataType).toMap
+
+    // First, tries to convert each filter individually to see whether it's convertible, and then
+    // collect all convertible ones to build the final `SearchArgument`.
+    val convertibleFilters = for {
+      filter <- filters
+      _ <- buildSearchArgument(dataTypeMap, filter, newBuilder)
+    } yield filter
+
     for {
       // Combines all convertible filters using `And` to produce a single conjunction
-      conjunction <- buildTree(convertibleFilters(schema, dataTypeMap, filters))
+      conjunction <- buildTree(convertibleFilters)
       // Then tries to build a single ORC `SearchArgument` for the conjunction predicate
       builder <- buildSearchArgument(dataTypeMap, conjunction, newBuilder)
     } yield builder.build()
-  }
-
-  def convertibleFilters(
-      schema: StructType,
-      dataTypeMap: Map[String, DataType],
-      filters: Seq[Filter]): Seq[Filter] = {
-    for {
-      filter <- filters
-      _ <- buildSearchArgument(dataTypeMap, filter, newBuilder())
-    } yield filter
   }
 
   /**
@@ -136,10 +135,7 @@ private[sql] object OrcFilters {
     case FloatType | DoubleType =>
       value.asInstanceOf[Number].doubleValue()
     case _: DecimalType =>
-      val decimal = value.asInstanceOf[java.math.BigDecimal]
-      val decimalWritable = new HiveDecimalWritable(decimal.longValue)
-      decimalWritable.mutateEnforcePrecisionScale(decimal.precision, decimal.scale)
-      decimalWritable
+      new HiveDecimalWritable(HiveDecimal.create(value.asInstanceOf[java.math.BigDecimal]))
     case _ => value
   }
 
@@ -150,23 +146,6 @@ private[sql] object OrcFilters {
       dataTypeMap: Map[String, DataType],
       expression: Filter,
       builder: Builder): Option[Builder] = {
-    createBuilder(dataTypeMap, expression, builder, canPartialPushDownConjuncts = true)
-  }
-
-  /**
-   * @param dataTypeMap a map from the attribute name to its data type.
-   * @param expression the input filter predicates.
-   * @param builder the input SearchArgument.Builder.
-   * @param canPartialPushDownConjuncts whether a subset of conjuncts of predicates can be pushed
-   *                                    down safely. Pushing ONLY one side of AND down is safe to
-   *                                    do at the top level or none of its ancestors is NOT and OR.
-   * @return the builder so far.
-   */
-  private def createBuilder(
-      dataTypeMap: Map[String, DataType],
-      expression: Filter,
-      builder: Builder,
-      canPartialPushDownConjuncts: Boolean): Option[Builder] = {
     def getType(attribute: String): PredicateLeaf.Type =
       getPredicateLeafType(dataTypeMap(attribute))
 
@@ -174,52 +153,32 @@ private[sql] object OrcFilters {
 
     expression match {
       case And(left, right) =>
-        // At here, it is not safe to just convert one side and remove the other side
-        // if we do not understand what the parent filters are.
-        //
-        // Here is an example used to explain the reason.
+        // At here, it is not safe to just convert one side if we do not understand the
+        // other side. Here is an example used to explain the reason.
         // Let's say we have NOT(a = 2 AND b in ('1')) and we do not understand how to
         // convert b in ('1'). If we only convert a = 2, we will end up with a filter
         // NOT(a = 2), which will generate wrong results.
-        //
-        // Pushing one side of AND down is only safe to do at the top level or in the child
-        // AND before hitting NOT or OR conditions, and in this case, the unsupported predicate
-        // can be safely removed.
-        val leftBuilderOption =
-          createBuilder(dataTypeMap, left, newBuilder, canPartialPushDownConjuncts)
-        val rightBuilderOption =
-          createBuilder(dataTypeMap, right, newBuilder, canPartialPushDownConjuncts)
-        (leftBuilderOption, rightBuilderOption) match {
-          case (Some(_), Some(_)) =>
-            for {
-              lhs <- createBuilder(dataTypeMap, left,
-                builder.startAnd(), canPartialPushDownConjuncts)
-              rhs <- createBuilder(dataTypeMap, right, lhs, canPartialPushDownConjuncts)
-            } yield rhs.end()
-
-          case (Some(_), None) if canPartialPushDownConjuncts =>
-            createBuilder(dataTypeMap, left, builder, canPartialPushDownConjuncts)
-
-          case (None, Some(_)) if canPartialPushDownConjuncts =>
-            createBuilder(dataTypeMap, right, builder, canPartialPushDownConjuncts)
-
-          case _ => None
-        }
+        // Pushing one side of AND down is only safe to do at the top level.
+        // You can see ParquetRelation's initializeLocalJobFunc method as an example.
+        for {
+          _ <- buildSearchArgument(dataTypeMap, left, newBuilder)
+          _ <- buildSearchArgument(dataTypeMap, right, newBuilder)
+          lhs <- buildSearchArgument(dataTypeMap, left, builder.startAnd())
+          rhs <- buildSearchArgument(dataTypeMap, right, lhs)
+        } yield rhs.end()
 
       case Or(left, right) =>
         for {
-          _ <- createBuilder(dataTypeMap, left, newBuilder, canPartialPushDownConjuncts = false)
-          _ <- createBuilder(dataTypeMap, right, newBuilder, canPartialPushDownConjuncts = false)
-          lhs <- createBuilder(dataTypeMap, left,
-            builder.startOr(), canPartialPushDownConjuncts = false)
-          rhs <- createBuilder(dataTypeMap, right, lhs, canPartialPushDownConjuncts = false)
+          _ <- buildSearchArgument(dataTypeMap, left, newBuilder)
+          _ <- buildSearchArgument(dataTypeMap, right, newBuilder)
+          lhs <- buildSearchArgument(dataTypeMap, left, builder.startOr())
+          rhs <- buildSearchArgument(dataTypeMap, right, lhs)
         } yield rhs.end()
 
       case Not(child) =>
         for {
-          _ <- createBuilder(dataTypeMap, child, newBuilder, canPartialPushDownConjuncts = false)
-          negate <- createBuilder(dataTypeMap,
-            child, builder.startNot(), canPartialPushDownConjuncts = false)
+          _ <- buildSearchArgument(dataTypeMap, child, newBuilder)
+          negate <- buildSearchArgument(dataTypeMap, child, builder.startNot())
         } yield negate.end()
 
       // NOTE: For all case branches dealing with leaf predicates below, the additional `startAnd()`

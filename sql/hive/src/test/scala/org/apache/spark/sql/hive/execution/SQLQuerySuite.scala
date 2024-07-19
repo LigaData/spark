@@ -26,7 +26,7 @@ import java.util.{Locale, Set}
 import com.google.common.io.Files
 import org.apache.hadoop.fs.{FileSystem, Path}
 
-import org.apache.spark.{SparkException, TestUtils}
+import org.apache.spark.TestUtils
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, FunctionRegistry}
@@ -41,7 +41,9 @@ import org.apache.spark.sql.hive.test.TestHiveSingleton
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SQLTestUtils
 import org.apache.spark.sql.types._
+import org.apache.spark.tags.SlowHiveTest
 import org.apache.spark.unsafe.types.CalendarInterval
+import org.apache.spark.util.Utils
 
 case class Nested1(f1: Nested2)
 case class Nested2(f2: Nested3)
@@ -66,6 +68,7 @@ case class Order(
  * Hive to generate them (in contrast to HiveQuerySuite).  Often this is because the query is
  * valid, but Hive currently cannot execute it.
  */
+@SlowHiveTest
 class SQLQuerySuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
   import hiveContext._
   import spark.implicits._
@@ -692,8 +695,8 @@ class SQLQuerySuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
               |AS SELECT key, value FROM mytable1
             """.stripMargin)
         }.getMessage
-        assert(e.contains("Create Partitioned Table As Select cannot specify data type for " +
-          "the partition columns of the target table"))
+        assert(e.contains("A Create Table As Select (CTAS) statement is not allowed to " +
+          "create a partitioned table using Hive's file formats"))
       }
     }
   }
@@ -1178,11 +1181,13 @@ class SQLQuerySuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
   }
 
   test("Convert hive interval term into Literal of CalendarIntervalType") {
+    checkAnswer(sql("select interval '0 0:0:0.1' day to second"),
+      Row(CalendarInterval.fromString("interval 100 milliseconds")))
     checkAnswer(sql("select interval '10-9' year to month"),
       Row(CalendarInterval.fromString("interval 10 years 9 months")))
     checkAnswer(sql("select interval '20 15:40:32.99899999' day to second"),
       Row(CalendarInterval.fromString("interval 2 weeks 6 days 15 hours 40 minutes " +
-        "32 seconds 99 milliseconds 899 microseconds")))
+        "32 seconds 998 milliseconds 999 microseconds")))
     checkAnswer(sql("select interval '30' year"),
       Row(CalendarInterval.fromString("interval 30 years")))
     checkAnswer(sql("select interval '25' month"),
@@ -2276,46 +2281,6 @@ class SQLQuerySuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
     }
   }
 
-  test("SPARK-25271: Hive ctas commands should use data source if it is convertible") {
-    withTempView("p") {
-      Seq(1, 2, 3).toDF("id").createOrReplaceTempView("p")
-
-      Seq("orc", "parquet").foreach { format =>
-        Seq(true, false).foreach { isConverted =>
-          withSQLConf(
-            HiveUtils.CONVERT_METASTORE_ORC.key -> s"$isConverted",
-            HiveUtils.CONVERT_METASTORE_PARQUET.key -> s"$isConverted") {
-            Seq(true, false).foreach { isConvertedCtas =>
-              withSQLConf(HiveUtils.CONVERT_METASTORE_CTAS.key -> s"$isConvertedCtas") {
-
-                val targetTable = "targetTable"
-                withTable(targetTable) {
-                  val df = sql(s"CREATE TABLE $targetTable STORED AS $format AS SELECT id FROM p")
-                  checkAnswer(sql(s"SELECT id FROM $targetTable"),
-                    Row(1) :: Row(2) :: Row(3) :: Nil)
-
-                  val ctasDSCommand = df.queryExecution.analyzed.collect {
-                    case _: OptimizedCreateHiveTableAsSelectCommand => true
-                  }.headOption
-                  val ctasCommand = df.queryExecution.analyzed.collect {
-                    case _: CreateHiveTableAsSelectCommand => true
-                  }.headOption
-
-                  if (isConverted && isConvertedCtas) {
-                    assert(ctasDSCommand.nonEmpty)
-                    assert(ctasCommand.isEmpty)
-                  } else {
-                    assert(ctasDSCommand.isEmpty)
-                    assert(ctasCommand.nonEmpty)
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
 
   test("SPARK-26181 hasMinMaxStats method of ColumnStatsMap is not correct") {
     withSQLConf(SQLConf.CBO_ENABLED.key -> "true") {
@@ -2348,34 +2313,100 @@ class SQLQuerySuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
     }
   }
 
-  test("SPARK-25158: " +
-    "Executor accidentally exit because ScriptTransformationWriterThread throw Exception") {
-    withTempView("test") {
-      val defaultUncaughtExceptionHandler = Thread.getDefaultUncaughtExceptionHandler
-      try {
-        val uncaughtExceptionHandler = new TestUncaughtExceptionHandler
-        Thread.setDefaultUncaughtExceptionHandler(uncaughtExceptionHandler)
-
-        // Use a bad udf to generate failed inputs.
-        val badUDF = org.apache.spark.sql.functions.udf((x: Int) => {
-          if (x < 1) x
-          else throw new RuntimeException("Failed to produce data.")
-        })
-        spark
-          .range(5)
-          .select(badUDF('id).as("a"))
-          .createOrReplaceTempView("test")
-        val scriptFilePath = getTestResourcePath("data")
-        val e = intercept[SparkException] {
+  test("partition pruning should handle date correctly") {
+    withSQLConf(SQLConf.OPTIMIZER_INSET_CONVERSION_THRESHOLD.key -> "2") {
+      withTable("t") {
+        sql("CREATE TABLE t (i INT) PARTITIONED BY (j DATE)")
+        sql("INSERT INTO t PARTITION(j='1990-11-11') SELECT 1")
+        checkAnswer(sql("SELECT i, CAST(j AS STRING) FROM t"), Row(1, "1990-11-11"))
+        checkAnswer(
           sql(
-            s"""FROM test SELECT TRANSFORM(a)
-               |USING 'python $scriptFilePath/scripts/test_transform.py "\t"'
-             """.stripMargin).collect()
+            """
+              |SELECT i, CAST(j AS STRING)
+              |FROM t
+              |WHERE j IN (DATE'1990-11-10', DATE'1990-11-11', DATE'1990-11-12')
+              |""".stripMargin),
+          Row(1, "1990-11-11"))
+      }
+    }
+  }
+
+  test("SPARK-29295: insert overwrite external partition should not have old data") {
+    Seq("true", "false").foreach { convertParquet =>
+      withTable("spark29295") {
+        withTempDir { f =>
+          sql("CREATE EXTERNAL TABLE spark29295(id int) PARTITIONED BY (name string) STORED AS " +
+            s"PARQUET LOCATION '${f.getAbsolutePath}'")
+
+          withSQLConf(HiveUtils.CONVERT_METASTORE_PARQUET.key -> convertParquet) {
+            sql("INSERT OVERWRITE TABLE spark29295 PARTITION(name='n1') SELECT 1")
+            sql("ALTER TABLE spark29295 DROP PARTITION(name='n1')")
+            sql("INSERT OVERWRITE TABLE spark29295 PARTITION(name='n1') SELECT 2")
+            checkAnswer(sql("SELECT id FROM spark29295 WHERE name = 'n1' ORDER BY id"),
+              Array(Row(2)))
+          }
         }
-        assert(e.getMessage.contains("Failed to produce data."))
-        assert(uncaughtExceptionHandler.exception.isEmpty)
-      } finally {
-        Thread.setDefaultUncaughtExceptionHandler(defaultUncaughtExceptionHandler)
+      }
+    }
+  }
+
+  test("SPARK-29295: dynamic insert overwrite external partition should not have old data") {
+    Seq("true", "false").foreach { convertParquet =>
+      withTable("spark29295") {
+        withTempDir { f =>
+          sql("CREATE EXTERNAL TABLE spark29295(id int) PARTITIONED BY (p1 string, p2 string) " +
+            s"STORED AS PARQUET LOCATION '${f.getAbsolutePath}'")
+
+          withSQLConf(HiveUtils.CONVERT_METASTORE_PARQUET.key -> convertParquet,
+            "hive.exec.dynamic.partition.mode" -> "nonstrict") {
+            sql(
+              """
+                |INSERT OVERWRITE TABLE spark29295 PARTITION(p1='n1', p2)
+                |SELECT * FROM VALUES (1, 'n2'), (2, 'n3') AS t(id, p2)
+              """.stripMargin)
+            checkAnswer(sql("SELECT id FROM spark29295 WHERE p1 = 'n1' and p2 = 'n2' ORDER BY id"),
+              Array(Row(1)))
+            checkAnswer(sql("SELECT id FROM spark29295 WHERE p1 = 'n1' and p2 = 'n3' ORDER BY id"),
+              Array(Row(2)))
+
+            sql("INSERT OVERWRITE TABLE spark29295 PARTITION(p1='n1', p2) SELECT 4, 'n4'")
+            checkAnswer(sql("SELECT id FROM spark29295 WHERE p1 = 'n1' and p2 = 'n4' ORDER BY id"),
+              Array(Row(4)))
+
+            sql("ALTER TABLE spark29295 DROP PARTITION(p1='n1',p2='n2')")
+            sql("ALTER TABLE spark29295 DROP PARTITION(p1='n1',p2='n3')")
+
+            sql(
+              """
+                |INSERT OVERWRITE TABLE spark29295 PARTITION(p1='n1', p2)
+                |SELECT * FROM VALUES (5, 'n2'), (6, 'n3') AS t(id, p2)
+              """.stripMargin)
+            checkAnswer(sql("SELECT id FROM spark29295 WHERE p1 = 'n1' and p2 = 'n2' ORDER BY id"),
+              Array(Row(5)))
+            checkAnswer(sql("SELECT id FROM spark29295 WHERE p1 = 'n1' and p2 = 'n3' ORDER BY id"),
+              Array(Row(6)))
+            // Partition not overwritten should not be deleted.
+            checkAnswer(sql("SELECT id FROM spark29295 WHERE p1 = 'n1' and p2 = 'n4' ORDER BY id"),
+              Array(Row(4)))
+          }
+        }
+      }
+
+      withTable("spark29295") {
+        withTempDir { f =>
+          sql("CREATE EXTERNAL TABLE spark29295(id int) PARTITIONED BY (p1 string, p2 string) " +
+            s"STORED AS PARQUET LOCATION '${f.getAbsolutePath}'")
+
+          withSQLConf(HiveUtils.CONVERT_METASTORE_PARQUET.key -> convertParquet,
+            "hive.exec.dynamic.partition.mode" -> "nonstrict") {
+            // We should unescape partition value.
+            sql("INSERT OVERWRITE TABLE spark29295 PARTITION(p1='n1', p2) SELECT 1, '/'")
+            sql("ALTER TABLE spark29295 DROP PARTITION(p1='n1',p2='/')")
+            sql("INSERT OVERWRITE TABLE spark29295 PARTITION(p1='n1', p2) SELECT 2, '/'")
+            checkAnswer(sql("SELECT id FROM spark29295 WHERE p1 = 'n1' and p2 = '/' ORDER BY id"),
+              Array(Row(2)))
+          }
+        }
       }
     }
   }

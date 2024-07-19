@@ -22,7 +22,6 @@ import java.io._
 import java.nio.charset.StandardCharsets
 
 import org.apache.commons.io.IOUtils
-import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.TopicPartition
 
 import org.apache.spark.SparkContext
@@ -187,7 +186,7 @@ private[kafka010] class KafkaSource(
       until.map {
         case (tp, end) =>
           tp -> sizes.get(tp).map { size =>
-            val begin = from.getOrElse(tp, fromNew(tp))
+            val begin = from.get(tp).getOrElse(fromNew(tp))
             val prorate = limit * (size / total)
             logDebug(s"rateLimit $tp prorated amount is $prorate")
             // Don't completely starve small topicpartitions
@@ -251,12 +250,7 @@ private[kafka010] class KafkaSource(
 
     val deletedPartitions = fromPartitionOffsets.keySet.diff(untilPartitionOffsets.keySet)
     if (deletedPartitions.nonEmpty) {
-      val message = if (kafkaReader.driverKafkaParams.containsKey(ConsumerConfig.GROUP_ID_CONFIG)) {
-        s"$deletedPartitions are gone. ${KafkaSourceProvider.CUSTOM_GROUP_ID_ERROR_MESSAGE}"
-      } else {
-        s"$deletedPartitions are gone. Some data may have been missed."
-      }
-      reportDataLoss(message)
+      reportDataLoss(s"$deletedPartitions are gone. Some data may have been missed")
     }
 
     // Use the until partitions to calculate offset ranges to ignore partitions that have
@@ -273,11 +267,13 @@ private[kafka010] class KafkaSource(
 
     // Calculate offset ranges
     val offsetRanges = topicPartitions.map { tp =>
-      val fromOffset = fromPartitionOffsets.getOrElse(tp, newPartitionOffsets.getOrElse(tp, {
-        // This should not happen since newPartitionOffsets contains all partitions not in
-        // fromPartitionOffsets
-        throw new IllegalStateException(s"$tp doesn't have a from offset")
-      }))
+      val fromOffset = fromPartitionOffsets.get(tp).getOrElse {
+        newPartitionOffsets.getOrElse(tp, {
+          // This should not happen since newPartitionOffsets contains all partitions not in
+          // fromPartitionOffsets
+          throw new IllegalStateException(s"$tp doesn't have a from offset")
+        })
+      }
       val untilOffset = untilPartitionOffsets(tp)
       val preferredLoc = if (numExecutors > 0) {
         // This allows cached KafkaConsumers in the executors to be re-used to read the same

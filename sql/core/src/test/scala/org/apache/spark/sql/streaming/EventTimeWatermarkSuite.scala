@@ -20,8 +20,7 @@ package org.apache.spark.sql.streaming
 import java.{util => ju}
 import java.io.File
 import java.text.SimpleDateFormat
-import java.util.{Calendar, Date, Locale}
-import java.util.concurrent.TimeUnit._
+import java.util.{Calendar, Date}
 
 import org.apache.commons.io.FileUtils
 import org.scalatest.{BeforeAndAfter, Matchers}
@@ -29,6 +28,7 @@ import org.scalatest.{BeforeAndAfter, Matchers}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{AnalysisException, Dataset}
 import org.apache.spark.sql.catalyst.plans.logical.EventTimeWatermark
+import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.streaming._
 import org.apache.spark.sql.functions.{count, window}
 import org.apache.spark.sql.internal.SQLConf
@@ -347,13 +347,12 @@ class EventTimeWatermarkSuite extends StreamTest with BeforeAndAfter with Matche
     }
 
     testStream(aggWithWatermark)(
-      AddData(input, MILLISECONDS.toSeconds(currentTimeMs)),
+      AddData(input, currentTimeMs / 1000),
       CheckAnswer(),
-      AddData(input, MILLISECONDS.toSeconds(currentTimeMs)),
+      AddData(input, currentTimeMs / 1000),
       CheckAnswer(),
       assertEventStats { e =>
-        assert(timestampFormat.parse(e.get("max")).getTime ===
-          SECONDS.toMillis(MILLISECONDS.toSeconds((currentTimeMs))))
+        assert(timestampFormat.parse(e.get("max")).getTime === (currentTimeMs / 1000) * 1000)
         val watermarkTime = timestampFormat.parse(e.get("watermark"))
         val monthDiff = monthsSinceEpoch(currentTime) - monthsSinceEpoch(watermarkTime)
         // monthsSinceEpoch is like `math.floor(num)`, so monthDiff has two possible values.
@@ -725,7 +724,7 @@ class EventTimeWatermarkSuite extends StreamTest with BeforeAndAfter with Matche
       val e = intercept[IllegalArgumentException] {
         spark.conf.set(SQLConf.STREAMING_MULTIPLE_WATERMARK_POLICY.key, value)
       }
-      assert(e.getMessage.toLowerCase(Locale.ROOT).contains("valid values are 'min' and 'max'"))
+      assert(e.getMessage.toLowerCase.contains("valid values are 'min' and 'max'"))
     }
   }
 

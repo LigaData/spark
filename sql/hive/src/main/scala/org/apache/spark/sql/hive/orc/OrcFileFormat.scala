@@ -37,7 +37,7 @@ import org.apache.hadoop.hive.serde2.typeinfo.{StructTypeInfo, TypeInfoUtils}
 import org.apache.hadoop.io.{NullWritable, Writable}
 import org.apache.hadoop.mapred.{JobConf, OutputFormat => MapRedOutputFormat, RecordWriter, Reporter}
 import org.apache.hadoop.mapreduce._
-import org.apache.hadoop.mapreduce.lib.input.FileInputFormat
+import org.apache.hadoop.mapreduce.lib.input.{FileInputFormat, FileSplit}
 import org.apache.orc.OrcConf.COMPRESS
 
 import org.apache.spark.{SPARK_VERSION_SHORT, TaskContext}
@@ -70,7 +70,7 @@ class OrcFileFormat extends FileFormat with DataSourceRegister with Serializable
     val ignoreCorruptFiles = sparkSession.sessionState.conf.ignoreCorruptFiles
     OrcFileOperator.readSchema(
       files.map(_.getPath.toString),
-      Some(sparkSession.sessionState.newHadoopConf()),
+      Some(sparkSession.sessionState.newHadoopConfWithOptions(options)),
       ignoreCorruptFiles
     )
   }
@@ -162,12 +162,13 @@ class OrcFileFormat extends FileFormat with DataSourceRegister with Serializable
           val job = Job.getInstance(conf)
           FileInputFormat.setInputPaths(job, file.filePath)
 
+          val fileSplit = new FileSplit(filePath, file.start, file.length, Array.empty)
           // Custom OrcRecordReader is used to get
           // ObjectInspector during recordReader creation itself and can
           // avoid NameNode call in unwrapOrcStructs per file.
           // Specifically would be helpful for partitioned datasets.
           val orcReader = OrcFile.createReader(filePath, OrcFile.readerOptions(conf))
-          new SparkOrcNewRecordReader(orcReader, conf, file.start, file.length)
+          new SparkOrcNewRecordReader(orcReader, conf, fileSplit.getStart, fileSplit.getLength)
         }
 
         val recordsIterator = new RecordReaderIterator[OrcStruct](orcRecordReader)
@@ -185,17 +186,19 @@ class OrcFileFormat extends FileFormat with DataSourceRegister with Serializable
     }
   }
 
-  override def supportDataType(dataType: DataType): Boolean = dataType match {
+  override def supportDataType(dataType: DataType, isReadPath: Boolean): Boolean = dataType match {
     case _: AtomicType => true
 
-    case st: StructType => st.forall { f => supportDataType(f.dataType) }
+    case st: StructType => st.forall { f => supportDataType(f.dataType, isReadPath) }
 
-    case ArrayType(elementType, _) => supportDataType(elementType)
+    case ArrayType(elementType, _) => supportDataType(elementType, isReadPath)
 
     case MapType(keyType, valueType, _) =>
-      supportDataType(keyType) && supportDataType(valueType)
+      supportDataType(keyType, isReadPath) && supportDataType(valueType, isReadPath)
 
-    case udt: UserDefinedType[_] => supportDataType(udt.sqlType)
+    case udt: UserDefinedType[_] => supportDataType(udt.sqlType, isReadPath)
+
+    case _: NullType => isReadPath
 
     case _ => false
   }

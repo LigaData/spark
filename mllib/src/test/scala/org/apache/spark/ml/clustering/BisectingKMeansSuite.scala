@@ -134,8 +134,6 @@ class BisectingKMeansSuite extends MLTest with DefaultReadWriteTest {
     assert(clusterSizes.sum === numRows)
     assert(clusterSizes.forall(_ >= 0))
     assert(summary.numIter == 20)
-    assert(summary.trainingCost < 0.1)
-    assert(model.computeCost(dataset) == summary.trainingCost)
 
     model.setSummary(None)
     assert(!model.hasSummary)
@@ -204,13 +202,6 @@ class BisectingKMeansSuite extends MLTest with DefaultReadWriteTest {
     // checking the cost is fine enough as a sanity check
     assert(trueCost ~== doubleArrayCost absTol 1e-6)
     assert(trueCost ~== floatArrayCost absTol 1e-6)
-  }
-
-  test("prediction on single instance") {
-    val bikm = new BisectingKMeans().setSeed(123L)
-    val model = bikm.fit(dataset)
-    testClusteringModelSinglePrediction(model, model.predict, dataset,
-      model.getFeaturesCol, model.getPredictionCol)
   }
 }
 

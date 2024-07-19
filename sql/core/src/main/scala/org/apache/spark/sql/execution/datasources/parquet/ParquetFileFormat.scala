@@ -129,7 +129,7 @@ class ParquetFileFormat
       conf.setEnum(ParquetOutputFormat.JOB_SUMMARY_LEVEL, JobSummaryLevel.NONE)
     }
 
-    if (ParquetOutputFormat.getJobSummaryLevel(conf) == JobSummaryLevel.NONE
+    if (ParquetOutputFormat.getJobSummaryLevel(conf) != JobSummaryLevel.NONE
       && !classOf[ParquetOutputCommitter].isAssignableFrom(committerClass)) {
       // output summary is requested, but the class is not a Parquet Committer
       logWarning(s"Committer $committerClass is not a ParquetOutputCommitter and cannot" +
@@ -238,7 +238,7 @@ class ParquetFileFormat
             .orElse(filesByType.data.headOption)
             .toSeq
       }
-    ParquetFileFormat.mergeSchemasInParallel(filesToTouch, sparkSession)
+    ParquetFileFormat.mergeSchemasInParallel(parameters, filesToTouch, sparkSession)
   }
 
   case class FileTypes(
@@ -352,14 +352,17 @@ class ParquetFileFormat
     (file: PartitionedFile) => {
       assert(file.partitionValues.numFields == partitionSchema.size)
 
-      val filePath = new Path(new URI(file.filePath))
+      val fileSplit =
+        new FileSplit(new Path(new URI(file.filePath)), file.start, file.length, Array.empty)
+      val filePath = fileSplit.getPath
+
       val split =
         new org.apache.parquet.hadoop.ParquetInputSplit(
           filePath,
-          file.start,
-          file.start + file.length,
-          file.length,
-          Array.empty,
+          fileSplit.getStart,
+          fileSplit.getStart + fileSplit.getLength,
+          fileSplit.getLength,
+          fileSplit.getLocations,
           null)
 
       val sharedConf = broadcastedHadoopConf.value.value
@@ -453,17 +456,17 @@ class ParquetFileFormat
     }
   }
 
-  override def supportDataType(dataType: DataType): Boolean = dataType match {
+  override def supportDataType(dataType: DataType, isReadPath: Boolean): Boolean = dataType match {
     case _: AtomicType => true
 
-    case st: StructType => st.forall { f => supportDataType(f.dataType) }
+    case st: StructType => st.forall { f => supportDataType(f.dataType, isReadPath) }
 
-    case ArrayType(elementType, _) => supportDataType(elementType)
+    case ArrayType(elementType, _) => supportDataType(elementType, isReadPath)
 
     case MapType(keyType, valueType, _) =>
-      supportDataType(keyType) && supportDataType(valueType)
+      supportDataType(keyType, isReadPath) && supportDataType(valueType, isReadPath)
 
-    case udt: UserDefinedType[_] => supportDataType(udt.sqlType)
+    case udt: UserDefinedType[_] => supportDataType(udt.sqlType, isReadPath)
 
     case _ => false
   }
@@ -566,11 +569,13 @@ object ParquetFileFormat extends Logging {
    *     S3 nodes).
    */
   def mergeSchemasInParallel(
+      parameters: Map[String, String],
       filesToTouch: Seq[FileStatus],
       sparkSession: SparkSession): Option[StructType] = {
     val assumeBinaryIsString = sparkSession.sessionState.conf.isParquetBinaryAsString
     val assumeInt96IsTimestamp = sparkSession.sessionState.conf.isParquetINT96AsTimestamp
-    val serializedConf = new SerializableConfiguration(sparkSession.sessionState.newHadoopConf())
+    val serializedConf = new SerializableConfiguration(
+      sparkSession.sessionState.newHadoopConfWithOptions(parameters))
 
     // !! HACK ALERT !!
     //

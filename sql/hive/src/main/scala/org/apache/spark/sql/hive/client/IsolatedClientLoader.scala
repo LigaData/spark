@@ -42,15 +42,15 @@ private[hive] object IsolatedClientLoader extends Logging {
    * Creates isolated Hive client loaders by downloading the requested version from maven.
    */
   def forVersion(
-      hiveMetastoreVersion: String,
-      hadoopVersion: String,
-      sparkConf: SparkConf,
-      hadoopConf: Configuration,
-      config: Map[String, String] = Map.empty,
-      ivyPath: Option[String] = None,
-      sharedPrefixes: Seq[String] = Seq.empty,
-      barrierPrefixes: Seq[String] = Seq.empty,
-      sharesHadoopClasses: Boolean = true): IsolatedClientLoader = synchronized {
+                  hiveMetastoreVersion: String,
+                  hadoopVersion: String,
+                  sparkConf: SparkConf,
+                  hadoopConf: Configuration,
+                  config: Map[String, String] = Map.empty,
+                  ivyPath: Option[String] = None,
+                  sharedPrefixes: Seq[String] = Seq.empty,
+                  barrierPrefixes: Seq[String] = Seq.empty,
+                  sharesHadoopClasses: Boolean = true): IsolatedClientLoader = synchronized {
     val resolvedVersion = hiveVersion(hiveMetastoreVersion)
     // We will first try to share Hadoop classes. If we cannot resolve the Hadoop artifact
     // with the given version, we will use Hadoop 2.7 and then will not share Hadoop classes.
@@ -65,7 +65,7 @@ private[hive] object IsolatedClientLoader extends Logging {
           case e: RuntimeException if e.getMessage.contains("hadoop") =>
             // If the error message contains hadoop, it is probably because the hadoop
             // version cannot be resolved.
-            val fallbackVersion = "2.7.4"
+            val fallbackVersion = "2.7.3"
             logWarning(s"Failed to resolve Hadoop artifacts for the version $hadoopVersion. We " +
               s"will change the hadoop version from $hadoopVersion to $fallbackVersion and try " +
               "again. Hadoop classes will not be shared between Spark and Hive metastore client. " +
@@ -93,8 +93,8 @@ private[hive] object IsolatedClientLoader extends Logging {
     case "12" | "0.12" | "0.12.0" => hive.v12
     case "13" | "0.13" | "0.13.0" | "0.13.1" => hive.v13
     case "14" | "0.14" | "0.14.0" => hive.v14
-    case "1.0" | "1.0.0" | "1.0.1" => hive.v1_0
-    case "1.1" | "1.1.0" | "1.1.1" => hive.v1_1
+    case "1.0" | "1.0.0" => hive.v1_0
+    case "1.1" | "1.1.0" => hive.v1_1
     case "1.2" | "1.2.0" | "1.2.1" | "1.2.2" => hive.v1_2
     case "2.0" | "2.0.0" | "2.0.1" => hive.v2_0
     case "2.1" | "2.1.0" | "2.1.1" => hive.v2_1
@@ -107,9 +107,9 @@ private[hive] object IsolatedClientLoader extends Logging {
   }
 
   private def downloadVersion(
-      version: HiveVersion,
-      hadoopVersion: String,
-      ivyPath: Option[String]): Seq[URL] = {
+                               version: HiveVersion,
+                               hadoopVersion: String,
+                               ivyPath: Option[String]): Seq[URL] = {
     val hiveArtifacts = version.extraDeps ++
       Seq("hive-metastore", "hive-exec", "hive-common", "hive-serde")
         .map(a => s"org.apache.hive:$a:${version.fullVersion}") ++
@@ -136,7 +136,7 @@ private[hive] object IsolatedClientLoader extends Logging {
   // A map from a given pair of HiveVersion and Hadoop version to jar files.
   // It is only used by forVersion.
   private val resolvedVersions =
-    new scala.collection.mutable.HashMap[(HiveVersion, String), Seq[URL]]
+  new scala.collection.mutable.HashMap[(HiveVersion, String), Seq[URL]]
 }
 
 /**
@@ -161,17 +161,17 @@ private[hive] object IsolatedClientLoader extends Logging {
  * @param baseClassLoader The spark classloader that is used to load shared classes.
  */
 private[hive] class IsolatedClientLoader(
-    val version: HiveVersion,
-    val sparkConf: SparkConf,
-    val hadoopConf: Configuration,
-    val execJars: Seq[URL] = Seq.empty,
-    val config: Map[String, String] = Map.empty,
-    val isolationOn: Boolean = true,
-    val sharesHadoopClasses: Boolean = true,
-    val rootClassLoader: ClassLoader = ClassLoader.getSystemClassLoader.getParent.getParent,
-    val baseClassLoader: ClassLoader = Thread.currentThread().getContextClassLoader,
-    val sharedPrefixes: Seq[String] = Seq.empty,
-    val barrierPrefixes: Seq[String] = Seq.empty)
+                                          val version: HiveVersion,
+                                          val sparkConf: SparkConf,
+                                          val hadoopConf: Configuration,
+                                          val execJars: Seq[URL] = Seq.empty,
+                                          val config: Map[String, String] = Map.empty,
+                                          val isolationOn: Boolean = true,
+                                          val sharesHadoopClasses: Boolean = true,
+                                          val rootClassLoader: ClassLoader = ClassLoader.getSystemClassLoader.getParent.getParent,
+                                          val baseClassLoader: ClassLoader = Thread.currentThread().getContextClassLoader,
+                                          val sharedPrefixes: Seq[String] = Seq.empty,
+                                          val barrierPrefixes: Seq[String] = Seq.empty)
   extends Logging {
 
   // Check to make sure that the root classloader does not know about Hive.
@@ -185,22 +185,22 @@ private[hive] class IsolatedClientLoader(
       name.startsWith("org.apache.hadoop.") && !name.startsWith("org.apache.hadoop.hive.")
 
     name.startsWith("org.slf4j") ||
-    name.startsWith("org.apache.log4j") || // log4j1.x
-    name.startsWith("org.apache.logging.log4j") || // log4j2
-    name.startsWith("org.apache.spark.") ||
-    (sharesHadoopClasses && isHadoopClass) ||
-    name.startsWith("scala.") ||
-    (name.startsWith("com.google") && !name.startsWith("com.google.cloud")) ||
-    name.startsWith("java.lang.") ||
-    name.startsWith("java.net") ||
-    sharedPrefixes.exists(name.startsWith)
+      name.startsWith("org.apache.log4j") || // log4j1.x
+      name.startsWith("org.apache.logging.log4j") || // log4j2
+      name.startsWith("org.apache.spark.") ||
+      (sharesHadoopClasses && isHadoopClass) ||
+      name.startsWith("scala.") ||
+      (name.startsWith("com.google") && !name.startsWith("com.google.cloud")) ||
+      name.startsWith("java.lang.") ||
+      name.startsWith("java.net") ||
+      sharedPrefixes.exists(name.startsWith)
   }
 
   /** True if `name` refers to a spark class that must see specific version of Hive. */
   protected def isBarrierClass(name: String): Boolean =
     name.startsWith(classOf[HiveClientImpl].getName) ||
-    name.startsWith(classOf[Shim].getName) ||
-    barrierPrefixes.exists(name.startsWith)
+      name.startsWith(classOf[Shim].getName) ||
+      barrierPrefixes.exists(name.startsWith)
 
   protected def classToPath(name: String): String =
     name.replaceAll("\\.", "/") + ".class"
@@ -281,8 +281,8 @@ private[hive] class IsolatedClientLoader(
           val cnf = e.getCause().asInstanceOf[NoClassDefFoundError]
           throw new ClassNotFoundException(
             s"$cnf when creating Hive client using classpath: ${execJars.mkString(", ")}\n" +
-            "Please make sure that jars for your version of hive and hadoop are included in the " +
-            s"paths passed to ${HiveUtils.HIVE_METASTORE_JARS.key}.", e)
+              "Please make sure that jars for your version of hive and hadoop are included in the " +
+              s"paths passed to ${HiveUtils.HIVE_METASTORE_JARS.key}.", e)
         } else {
           throw e
         }

@@ -16,12 +16,13 @@
  */
 package org.apache.spark.ml.util
 
-import java.io.ByteArrayInputStream
-import java.nio.charset.StandardCharsets
+import java.io.StringReader
+import javax.xml.bind.Unmarshaller
+import javax.xml.transform.Source
 
-import org.dmg.pmml.PMML
-import org.jpmml.model.{JAXBUtil, SAXUtil}
-import org.jpmml.model.filters.ImportFilter
+import org.dmg.pmml._
+import org.jpmml.model.{ImportFilter, JAXBUtil}
+import org.xml.sax.InputSource
 
 /**
  * Testing utils for working with PMML.
@@ -35,9 +36,8 @@ private[spark] object PMMLUtils {
    * through external spark-packages.
    */
   def loadFromString(input: String): PMML = {
-    val transformed = SAXUtil.createFilteredSource(
-      new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8)),
-      new ImportFilter())
+    val is = new StringReader(input)
+    val transformed = ImportFilter.apply(new InputSource(is))
     JAXBUtil.unmarshalPMML(transformed)
   }
 }

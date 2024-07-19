@@ -213,7 +213,7 @@ object StateStoreProvider {
    */
   def create(providerClassName: String): StateStoreProvider = {
     val providerClass = Utils.classForName(providerClassName)
-    providerClass.getConstructor().newInstance().asInstanceOf[StateStoreProvider]
+    providerClass.newInstance().asInstanceOf[StateStoreProvider]
   }
 
   /**
@@ -462,7 +462,8 @@ object StateStore extends Logging {
     val env = SparkEnv.get
     if (env != null) {
       val isDriver =
-        env.executorId == SparkContext.DRIVER_IDENTIFIER
+        env.executorId == SparkContext.DRIVER_IDENTIFIER ||
+          env.executorId == SparkContext.LEGACY_DRIVER_IDENTIFIER
       // If running locally, then the coordinator reference in _coordRef may be have become inactive
       // as SparkContext + SparkEnv may have been restarted. Hence, when running in driver,
       // always recreate the reference.

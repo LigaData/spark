@@ -24,7 +24,6 @@ import org.apache.spark.network.TransportContext
 import org.apache.spark.network.netty.SparkTransportConf
 import org.apache.spark.network.server.TransportServer
 import org.apache.spark.network.shuffle.{ExternalShuffleBlockHandler, ExternalShuffleClient}
-import org.apache.spark.util.Utils
 
 /**
  * This suite creates an external shuffle server and routes all shuffle fetches through it.
@@ -34,32 +33,26 @@ import org.apache.spark.util.Utils
  */
 class ExternalShuffleServiceSuite extends ShuffleSuite with BeforeAndAfterAll {
   var server: TransportServer = _
-  var transportContext: TransportContext = _
   var rpcHandler: ExternalShuffleBlockHandler = _
 
   override def beforeAll() {
     super.beforeAll()
     val transportConf = SparkTransportConf.fromSparkConf(conf, "shuffle", numUsableCores = 2)
     rpcHandler = new ExternalShuffleBlockHandler(transportConf, null)
-    transportContext = new TransportContext(transportConf, rpcHandler)
+    val transportContext = new TransportContext(transportConf, rpcHandler)
     server = transportContext.createServer()
 
-    conf.set(config.SHUFFLE_MANAGER, "sort")
-    conf.set(config.SHUFFLE_SERVICE_ENABLED, true)
-    conf.set(config.SHUFFLE_SERVICE_PORT, server.getPort)
+    conf.set("spark.shuffle.manager", "sort")
+    conf.set(config.SHUFFLE_SERVICE_ENABLED.key, "true")
+    conf.set(config.SHUFFLE_SERVICE_PORT.key, server.getPort.toString)
   }
 
   override def afterAll() {
-    Utils.tryLogNonFatalError{
+    try {
       server.close()
+    } finally {
+      super.afterAll()
     }
-    Utils.tryLogNonFatalError{
-      rpcHandler.close()
-    }
-    Utils.tryLogNonFatalError{
-      transportContext.close()
-    }
-    super.afterAll()
   }
 
   // This test ensures that the external shuffle service is actually in use for the other tests.

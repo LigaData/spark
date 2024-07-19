@@ -135,6 +135,11 @@ trait CheckAnalysis extends PredicateHelper {
             failAnalysis("An offset window function can only be evaluated in an ordered " +
               s"row-based window frame with a single offset: $w")
 
+          case _ @ WindowExpression(_: PythonUDF,
+            WindowSpecDefinition(_, _, frame: SpecifiedWindowFrame))
+              if !frame.isUnbounded =>
+            failAnalysis("Only unbounded window frame is supported with Pandas UDFs.")
+
           case w @ WindowExpression(e, s) =>
             // Only allow window functions with an aggregate expression or an offset window
             // function or a Pandas window UDF.
@@ -172,7 +177,7 @@ trait CheckAnalysis extends PredicateHelper {
             failAnalysis("Null-aware predicate sub-queries cannot be used in nested " +
               s"conditions: $condition")
 
-          case j @ Join(_, _, _, Some(condition), _) if condition.dataType != BooleanType =>
+          case j @ Join(_, _, _, Some(condition)) if condition.dataType != BooleanType =>
             failAnalysis(
               s"join condition '${condition.sql}' " +
                 s"of type ${condition.dataType.catalogString} is not a boolean.")
@@ -269,7 +274,8 @@ trait CheckAnalysis extends PredicateHelper {
             def ordinalNumber(i: Int): String = i match {
               case 0 => "first"
               case 1 => "second"
-              case i => s"${i}th"
+              case 2 => "third"
+              case i => s"${i + 1}th"
             }
             val ref = dataTypes(operator.children.head)
             operator.children.tail.zipWithIndex.foreach { case (child, ti) =>
@@ -296,6 +302,48 @@ trait CheckAnalysis extends PredicateHelper {
               }
             }
 
+          // If the view output doesn't have the same number of columns neither with the child
+          // output, nor with the query column names, throw an AnalysisException.
+          // If the view's child output can't up cast to the view output,
+          // throw an AnalysisException, too.
+          case v @ View(desc, output, child) if child.resolved && output != child.output =>
+            val queryColumnNames = desc.viewQueryColumnNames
+            val queryOutput = if (queryColumnNames.nonEmpty) {
+              if (output.length != queryColumnNames.length) {
+                // If the view output doesn't have the same number of columns with the query column
+                // names, throw an AnalysisException.
+                throw new AnalysisException(
+                  s"The view output ${output.mkString("[", ",", "]")} doesn't have the same" +
+                    "number of columns with the query column names " +
+                    s"${queryColumnNames.mkString("[", ",", "]")}")
+              }
+              val resolver = SQLConf.get.resolver
+              queryColumnNames.map { colName =>
+                child.output.find { attr =>
+                  resolver(attr.name, colName)
+                }.getOrElse(throw new AnalysisException(
+                  s"Attribute with name '$colName' is not found in " +
+                    s"'${child.output.map(_.name).mkString("(", ",", ")")}'"))
+              }
+            } else {
+              child.output
+            }
+
+            output.zip(queryOutput).foreach {
+              case (attr, originAttr) if !attr.dataType.sameType(originAttr.dataType) =>
+                // The dataType of the output attributes may be not the same with that of the view
+                // output, so we should cast the attribute to the dataType of the view output
+                // attribute. Will throw an AnalysisException if the cast can't be performed or
+                // might truncate.
+                if (Cast.mayTruncate(originAttr.dataType, attr.dataType) ||
+                  !Cast.canCast(originAttr.dataType, attr.dataType)) {
+                  throw new AnalysisException(s"Cannot up cast ${originAttr.sql} from " +
+                    s"${originAttr.dataType.catalogString} to ${attr.dataType.catalogString} " +
+                    "as it may truncate\n")
+                }
+              case _ =>
+            }
+
           case _ => // Fallbacks to the following checks
         }
 
@@ -304,7 +352,7 @@ trait CheckAnalysis extends PredicateHelper {
             val missingAttributes = o.missingInput.mkString(",")
             val input = o.inputSet.mkString(",")
             val msgForMissingAttributes = s"Resolved attribute(s) $missingAttributes missing " +
-              s"from $input in operator ${operator.simpleString(SQLConf.get.maxToStringFields)}."
+              s"from $input in operator ${operator.simpleString}."
 
             val resolver = plan.conf.resolver
             val attrsWithSameName = o.missingInput.filter { missing =>
@@ -369,7 +417,7 @@ trait CheckAnalysis extends PredicateHelper {
               s"""nondeterministic expressions are only allowed in
                  |Project, Filter, Aggregate or Window, found:
                  | ${o.expressions.map(_.sql).mkString(",")}
-                 |in operator ${operator.simpleString(SQLConf.get.maxToStringFields)}
+                 |in operator ${operator.simpleString}
                """.stripMargin)
 
           case _: UnresolvedHint =>
@@ -381,8 +429,7 @@ trait CheckAnalysis extends PredicateHelper {
     }
     extendedCheckRules.foreach(_(plan))
     plan.foreachUp {
-      case o if !o.resolved =>
-        failAnalysis(s"unresolved operator ${o.simpleString(SQLConf.get.maxToStringFields)}")
+      case o if !o.resolved => failAnalysis(s"unresolved operator ${o.simpleString}")
       case _ =>
     }
 
@@ -609,7 +656,7 @@ trait CheckAnalysis extends PredicateHelper {
         failOnNonEqualCorrelatedPredicate(foundNonEqualCorrelatedPred, a)
 
       // Join can host correlated expressions.
-      case j @ Join(left, right, joinType, _, _) =>
+      case j @ Join(left, right, joinType, _) =>
         joinType match {
           // Inner join, like Filter, can be anywhere.
           case _: InnerLike =>

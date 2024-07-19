@@ -39,10 +39,9 @@ import org.apache.spark.api.java.{JavaPairRDD, JavaRDD, JavaSparkContext}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.input.PortableDataStream
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.BUFFER_SIZE
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rdd.RDD
-import org.apache.spark.security.{SocketAuthHelper, SocketAuthServer}
+import org.apache.spark.security.SocketAuthHelper
 import org.apache.spark.util._
 
 
@@ -90,7 +89,7 @@ private[spark] case class PythonFunction(
 private[spark] case class ChainedPythonFunctions(funcs: Seq[PythonFunction])
 
 /** Thrown for exceptions in user Python code. */
-private[spark] class PythonException(msg: String, cause: Exception)
+private[spark] class PythonException(msg: String, cause: Throwable)
   extends RuntimeException(msg, cause)
 
 /**
@@ -171,18 +170,32 @@ private[spark] object PythonRDD extends Logging {
     serveIterator(rdd.toLocalIterator, s"serve toLocalIterator")
   }
 
-  def readRDDFromFile(
-      sc: JavaSparkContext,
-      filename: String,
-      parallelism: Int): JavaRDD[Array[Byte]] = {
-    JavaRDD.readRDDFromFile(sc, filename, parallelism)
+  def readRDDFromFile(sc: JavaSparkContext, filename: String, parallelism: Int):
+  JavaRDD[Array[Byte]] = {
+    readRDDFromInputStream(sc.sc, new FileInputStream(filename), parallelism)
   }
 
   def readRDDFromInputStream(
       sc: SparkContext,
       in: InputStream,
       parallelism: Int): JavaRDD[Array[Byte]] = {
-    JavaRDD.readRDDFromInputStream(sc, in, parallelism)
+    val din = new DataInputStream(in)
+    try {
+      val objs = new mutable.ArrayBuffer[Array[Byte]]
+      try {
+        while (true) {
+          val length = din.readInt()
+          val obj = new Array[Byte](length)
+          din.readFully(obj)
+          objs += obj
+        }
+      } catch {
+        case eof: EOFException => // No-op
+      }
+      JavaRDD.fromRDD(sc.parallelize(objs, parallelism))
+    } finally {
+      din.close()
+    }
   }
 
   def setupBroadcast(path: String): PythonBroadcast = {
@@ -416,7 +429,38 @@ private[spark] object PythonRDD extends Logging {
    */
   private[spark] def serveToStream(
       threadName: String)(writeFunc: OutputStream => Unit): Array[Any] = {
-    SocketAuthHelper.serveToStream(threadName, authHelper)(writeFunc)
+    val (port, secret) = PythonServer.setupOneConnectionServer(authHelper, threadName) { s =>
+      val out = new BufferedOutputStream(s.getOutputStream())
+      Utils.tryWithSafeFinally {
+        writeFunc(out)
+      } {
+        out.close()
+      }
+    }
+    Array(port, secret)
+  }
+
+  /**
+   * Create a socket server object and background thread to execute the writeFunc
+   * with the given OutputStream.
+   *
+   * This is the same as serveToStream, only it returns a server object that
+   * can be used to sync in Python.
+   */
+  private[spark] def serveToStreamWithSync(
+      threadName: String)(writeFunc: OutputStream => Unit): Array[Any] = {
+
+    val handleFunc = (sock: Socket) => {
+      val out = new BufferedOutputStream(sock.getOutputStream())
+      Utils.tryWithSafeFinally {
+        writeFunc(out)
+      } {
+        out.close()
+      }
+    }
+
+    val server = new SocketFuncServer(authHelper, threadName, handleFunc)
+    Array(server.port, server.secret, server)
   }
 
   private def getMergedConf(confAsMap: java.util.HashMap[String, String],
@@ -583,7 +627,7 @@ private[spark] class PythonAccumulatorV2(
 
   Utils.checkHost(serverHost)
 
-  val bufferSize = SparkEnv.get.conf.get(BUFFER_SIZE)
+  val bufferSize = SparkEnv.get.conf.getInt("spark.buffer.size", 65536)
 
   /**
    * We try to reuse a single Socket to transfer accumulator updates, as they are all added
@@ -595,8 +639,10 @@ private[spark] class PythonAccumulatorV2(
     if (socket == null || socket.isClosed) {
       socket = new Socket(serverHost, serverPort)
       logInfo(s"Connected to AccumulatorServer at host: $serverHost port: $serverPort")
-      // send the secret just for the initial authentication when opening a new connection
-      socket.getOutputStream.write(secretToken.getBytes(StandardCharsets.UTF_8))
+      if (secretToken != null) {
+        // send the secret just for the initial authentication when opening a new connection
+        socket.getOutputStream.write(secretToken.getBytes(StandardCharsets.UTF_8))
+      }
     }
     socket
   }
@@ -638,8 +684,8 @@ private[spark] class PythonAccumulatorV2(
 private[spark] class PythonBroadcast(@transient var path: String) extends Serializable
     with Logging {
 
-  private var encryptionServer: SocketAuthServer[Unit] = null
-  private var decryptionServer: SocketAuthServer[Unit] = null
+  private var encryptionServer: PythonServer[Unit] = null
+  private var decryptionServer: PythonServer[Unit] = null
 
   /**
    * Read data from disks, then copy it to `out`
@@ -684,7 +730,7 @@ private[spark] class PythonBroadcast(@transient var path: String) extends Serial
   }
 
   def setupEncryptionServer(): Array[Any] = {
-    encryptionServer = new SocketAuthServer[Unit]("broadcast-encrypt-server") {
+    encryptionServer = new PythonServer[Unit]("broadcast-encrypt-server") {
       override def handleConnection(sock: Socket): Unit = {
         val env = SparkEnv.get
         val in = sock.getInputStream()
@@ -697,7 +743,7 @@ private[spark] class PythonBroadcast(@transient var path: String) extends Serial
   }
 
   def setupDecryptionServer(): Array[Any] = {
-    decryptionServer = new SocketAuthServer[Unit]("broadcast-decrypt-server-for-driver") {
+    decryptionServer = new PythonServer[Unit]("broadcast-decrypt-server-for-driver") {
       override def handleConnection(sock: Socket): Unit = {
         val out = new DataOutputStream(new BufferedOutputStream(sock.getOutputStream()))
         Utils.tryWithSafeFinally {
@@ -793,12 +839,90 @@ private[spark] object DechunkedInputStream {
 }
 
 /**
+ * Creates a server in the jvm to communicate with python for handling one batch of data, with
+ * authentication and error handling.
+ */
+private[spark] abstract class PythonServer[T](
+    authHelper: SocketAuthHelper,
+    threadName: String) {
+
+  def this(env: SparkEnv, threadName: String) = this(new SocketAuthHelper(env.conf), threadName)
+  def this(threadName: String) = this(SparkEnv.get, threadName)
+
+  val (port, secret) = PythonServer.setupOneConnectionServer(authHelper, threadName) { sock =>
+    promise.complete(Try(handleConnection(sock)))
+  }
+
+  /**
+   * Handle a connection which has already been authenticated.  Any error from this function
+   * will clean up this connection and the entire server, and get propogated to [[getResult]].
+   */
+  def handleConnection(sock: Socket): T
+
+  val promise = Promise[T]()
+
+  /**
+   * Blocks indefinitely for [[handleConnection]] to finish, and returns that result.  If
+   * handleConnection throws an exception, this will throw an exception which includes the original
+   * exception as a cause.
+   */
+  def getResult(): T = {
+    getResult(Duration.Inf)
+  }
+
+  def getResult(wait: Duration): T = {
+    ThreadUtils.awaitResult(promise.future, wait)
+  }
+
+}
+
+private[spark] object PythonServer {
+
+  /**
+   * Create a socket server and run user function on the socket in a background thread.
+   *
+   * The socket server can only accept one connection, or close if no connection
+   * in 15 seconds.
+   *
+   * The thread will terminate after the supplied user function, or if there are any exceptions.
+   *
+   * If you need to get a result of the supplied function, create a subclass of [[PythonServer]]
+   *
+   * @return The port number of a local socket and the secret for authentication.
+   */
+  def setupOneConnectionServer(
+      authHelper: SocketAuthHelper,
+      threadName: String)
+      (func: Socket => Unit): (Int, String) = {
+    val serverSocket = new ServerSocket(0, 1, InetAddress.getByAddress(Array(127, 0, 0, 1)))
+    // Close the socket if no connection in 15 seconds
+    serverSocket.setSoTimeout(15000)
+
+    new Thread(threadName) {
+      setDaemon(true)
+      override def run(): Unit = {
+        var sock: Socket = null
+        try {
+          sock = serverSocket.accept()
+          authHelper.authClient(sock)
+          func(sock)
+        } finally {
+          JavaUtils.closeQuietly(serverSocket)
+          JavaUtils.closeQuietly(sock)
+        }
+      }
+    }.start()
+    (serverSocket.getLocalPort, authHelper.secret)
+  }
+}
+
+/**
  * Sends decrypted broadcast data to python worker.  See [[PythonRunner]] for entire protocol.
  */
 private[spark] class EncryptedPythonBroadcastServer(
     val env: SparkEnv,
     val idsAndFiles: Seq[(Long, String)])
-    extends SocketAuthServer[Unit]("broadcast-decrypt-server") with Logging {
+    extends PythonServer[Unit]("broadcast-decrypt-server") with Logging {
 
   override def handleConnection(socket: Socket): Unit = {
     val out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()))
@@ -836,7 +960,7 @@ private[spark] class EncryptedPythonBroadcastServer(
  * over a socket.  This is used in preference to writing data to a file when encryption is enabled.
  */
 private[spark] abstract class PythonRDDServer
-    extends SocketAuthServer[JavaRDD[Array[Byte]]]("pyspark-parallelize-server") {
+    extends PythonServer[JavaRDD[Array[Byte]]]("pyspark-parallelize-server") {
 
   def handleConnection(sock: Socket): JavaRDD[Array[Byte]] = {
     val in = sock.getInputStream()
@@ -853,5 +977,20 @@ private[spark] class PythonParallelizeServer(sc: SparkContext, parallelism: Int)
 
   override protected def streamToRDD(input: InputStream): RDD[Array[Byte]] = {
     PythonRDD.readRDDFromInputStream(sc, input, parallelism)
+  }
+}
+
+/**
+ * Create a socket server class and run user function on the socket in a background thread.
+ * This is the same as calling SocketAuthServer.setupOneConnectionServer except it creates
+ * a server object that can then be synced from Python.
+ */
+private [spark] class SocketFuncServer(
+    authHelper: SocketAuthHelper,
+    threadName: String,
+    func: Socket => Unit) extends PythonServer[Unit](authHelper, threadName) {
+
+  override def handleConnection(sock: Socket): Unit = {
+    func(sock)
   }
 }

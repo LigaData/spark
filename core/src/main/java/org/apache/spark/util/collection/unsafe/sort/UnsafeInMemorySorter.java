@@ -205,6 +205,10 @@ public final class UnsafeInMemorySorter {
   }
 
   public long getMemoryUsage() {
+    if (array == null) {
+      return 0L;
+    }
+
     return array.size() * 8;
   }
 
@@ -214,9 +218,7 @@ public final class UnsafeInMemorySorter {
 
   public void expandPointerArray(LongArray newArray) {
     if (newArray.size() < array.size()) {
-      // checkstyle.off: RegexpSinglelineJava
       throw new SparkOutOfMemoryError("Not enough memory to grow pointer array");
-      // checkstyle.on: RegexpSinglelineJava
     }
     Platform.copyMemory(
       array.getBaseObject(),

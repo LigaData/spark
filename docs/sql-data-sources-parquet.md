@@ -9,7 +9,7 @@ displayTitle: Parquet Files
 
 [Parquet](http://parquet.io) is a columnar format that is supported by many other data processing systems.
 Spark SQL provides support for both reading and writing Parquet files that automatically preserves the schema
-of the original data. When reading Parquet files, all columns are automatically converted to be nullable for
+of the original data. When writing Parquet files, all columns are automatically converted to be nullable for
 compatibility reasons.
 
 ### Loading Data Programmatically
@@ -157,10 +157,9 @@ turned it off by default starting from 1.5.0. You may enable it by
 
 ### Hive metastore Parquet table conversion
 
-When reading from Hive metastore Parquet tables and writing to non-partitioned Hive metastore
-Parquet tables, Spark SQL will try to use its own Parquet support instead of Hive SerDe for
-better performance. This behavior is controlled by the `spark.sql.hive.convertMetastoreParquet`
-configuration, and is turned on by default.
+When reading from and writing to Hive metastore Parquet tables, Spark SQL will try to use its own
+Parquet support instead of Hive SerDe for better performance. This behavior is controlled by the
+`spark.sql.hive.convertMetastoreParquet` configuration, and is turned on by default.
 
 #### Hive/Parquet Schema Reconciliation
 

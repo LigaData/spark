@@ -15,9 +15,11 @@
 # limitations under the License.
 #
 
-FROM openjdk:8-alpine
+FROM openjdk:8-jdk-slim
 
-ARG spark_uid=185
+ARG spark_jars=jars
+ARG img_path=kubernetes/dockerfiles
+ARG k8s_tests=kubernetes/tests
 
 # Before building the docker image, first build and make a Spark distribution following
 # the instructions in http://spark.apache.org/docs/latest/building-spark.html.
@@ -27,32 +29,28 @@ ARG spark_uid=185
 # docker build -t spark:latest -f kubernetes/dockerfiles/spark/Dockerfile .
 
 RUN set -ex && \
-    apk upgrade --no-cache && \
+    apt-get update && \
     ln -s /lib /lib64 && \
-    apk add --no-cache bash tini libc6-compat linux-pam krb5 krb5-libs && \
+    apt install -y bash tini libc6 libpam-modules libnss3 && \
     mkdir -p /opt/spark && \
-    mkdir -p /opt/spark/examples && \
     mkdir -p /opt/spark/work-dir && \
     touch /opt/spark/RELEASE && \
     rm /bin/sh && \
     ln -sv /bin/bash /bin/sh && \
     echo "auth required pam_wheel.so use_uid" >> /etc/pam.d/su && \
-    chgrp root /etc/passwd && chmod ug+rw /etc/passwd
+    chgrp root /etc/passwd && chmod ug+rw /etc/passwd && \
+    rm -rf /var/cache/apt/*
 
-COPY jars /opt/spark/jars
+COPY ${spark_jars} /opt/spark/jars
 COPY bin /opt/spark/bin
 COPY sbin /opt/spark/sbin
-COPY kubernetes/dockerfiles/spark/entrypoint.sh /opt/
+COPY ${img_path}/spark/entrypoint.sh /opt/
 COPY examples /opt/spark/examples
-COPY kubernetes/tests /opt/spark/tests
+COPY ${k8s_tests} /opt/spark/tests
 COPY data /opt/spark/data
 
 ENV SPARK_HOME /opt/spark
 
 WORKDIR /opt/spark/work-dir
-RUN chmod g+w /opt/spark/work-dir
 
 ENTRYPOINT [ "/opt/entrypoint.sh" ]
-
-# Specify the User that the actual main process will run as
-USER ${spark_uid}

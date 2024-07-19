@@ -195,7 +195,7 @@ class FileStreamSourceSuite extends FileStreamSourceTest {
 
   import testImplicits._
 
-  override val streamingTimeout = 20.seconds
+  override val streamingTimeout = 80.seconds
 
   /** Use `format` and `path` to create FileStreamSource via DataFrameReader */
   private def createFileStreamSource(
@@ -531,6 +531,18 @@ class FileStreamSourceSuite extends FileStreamSourceTest {
           true
         }
       )
+    }
+  }
+
+  test("SPARK-31935: Hadoop file system config should be effective in data source options") {
+    withTempDir { dir =>
+      val path = dir.getCanonicalPath
+      val defaultFs = "nonexistFS://nonexistFS"
+      val expectMessage = "No FileSystem for scheme: nonexistFS"
+      val message = intercept[java.io.IOException] {
+        spark.readStream.option("fs.defaultFS", defaultFs).text(path)
+      }.getMessage
+      assert(message == expectMessage)
     }
   }
 
@@ -1375,7 +1387,7 @@ class FileStreamSourceSuite extends FileStreamSourceTest {
       options = srcOptions)
     val clock = new StreamManualClock()
     testStream(fileStream)(
-      StartStream(trigger = Trigger.ProcessingTime(10), triggerClock = clock),
+      StartStream(trigger = ProcessingTime(10), triggerClock = clock),
       AssertOnQuery { _ =>
         // Block until the first batch finishes.
         eventually(timeout(streamingTimeout)) {

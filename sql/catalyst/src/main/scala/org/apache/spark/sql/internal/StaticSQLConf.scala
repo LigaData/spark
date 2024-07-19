@@ -99,15 +99,9 @@ object StaticSQLConf {
       .createWithDefault(false)
 
   val SPARK_SESSION_EXTENSIONS = buildStaticConf("spark.sql.extensions")
-    .doc("A comma-separated list of classes that implement " +
-      "Function1[SparkSessionExtensions, Unit] used to configure Spark Session extensions. The " +
-      "classes must have a no-args constructor. If multiple extensions are specified, they are " +
-      "applied in the specified order. For the case of rules and planner strategies, they are " +
-      "applied in the specified order. For the case of parsers, the last parser is used and each " +
-      "parser can delegate to its predecessor. For the case of function name conflicts, the last " +
-      "registered function name is used.")
+    .doc("Name of the class used to configure Spark Session extensions. The class should " +
+      "implement Function1[SparkSessionExtension, Unit], and must have a no-args constructor.")
     .stringConf
-    .toSequence
     .createOptional
 
   val QUERY_EXECUTION_LISTENERS = buildStaticConf("spark.sql.queryExecutionListeners")
@@ -132,10 +126,18 @@ object StaticSQLConf {
       .intConf
       .createWithDefault(1000)
 
-  val SQL_EVENT_TRUNCATE_LENGTH = buildStaticConf("spark.sql.event.truncate.length")
-    .doc("Threshold of SQL length beyond which it will be truncated before adding to " +
-      "event. Defaults to no truncation. If set to 0, callsite will be logged instead.")
-    .intConf
-    .checkValue(_ >= 0, "Must be set greater or equal to zero")
-    .createWithDefault(Int.MaxValue)
+  val SUBQUERY_MAX_THREAD_THRESHOLD =
+    buildStaticConf("spark.sql.subquery.maxThreadThreshold")
+      .internal()
+      .doc("The maximum degree of parallelism to execute the subquery.")
+      .intConf
+      .checkValue(thres => thres > 0 && thres <= 128, "The threshold must be in (0,128].")
+      .createWithDefault(16)
+
+  val DEFAULT_URL_STREAM_HANDLER_FACTORY_ENABLED =
+     buildStaticConf("spark.sql.defaultUrlStreamHandlerFactory.enabled")
+       .doc("When true, set FsUrlStreamHandlerFactory to support ADD JAR against HDFS locations")
+       .internal()
+       .booleanConf
+       .createWithDefault(true)
 }

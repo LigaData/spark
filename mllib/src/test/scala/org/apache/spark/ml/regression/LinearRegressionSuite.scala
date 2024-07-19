@@ -18,10 +18,10 @@
 package org.apache.spark.ml.regression
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 import scala.util.Random
 
-import org.dmg.pmml.{OpType, PMML}
-import org.dmg.pmml.regression.{RegressionModel => PMMLRegressionModel}
+import org.dmg.pmml.{OpType, PMML, RegressionModel => PMMLRegressionModel}
 
 import org.apache.spark.ml.feature.Instance
 import org.apache.spark.ml.feature.LabeledPoint
@@ -185,6 +185,18 @@ class LinearRegressionSuite extends MLTest with DefaultReadWriteTest with PMMLRe
     assert(model.hasParent)
     val numFeatures = datasetWithDenseFeature.select("features").first().getAs[Vector](0).size
     assert(model.numFeatures === numFeatures)
+  }
+
+  test("linear regression: can transform data with LinearRegressionModel") {
+    withClue("training related params like loss are only validated during fitting phase") {
+      val original = new LinearRegression().fit(datasetWithDenseFeature)
+
+      val deserialized = new LinearRegressionModel(uid = original.uid,
+        coefficients = original.coefficients,
+        intercept = original.intercept)
+      val output = deserialized.transform(datasetWithDenseFeature)
+      assert(output.collect().size > 0) // simple assertion to ensure no exception thrown
+    }
   }
 
   test("linear regression: illegal params") {
@@ -891,7 +903,6 @@ class LinearRegressionSuite extends MLTest with DefaultReadWriteTest with PMMLRe
         .setStandardization(standardization)
         .setRegParam(regParam)
         .setElasticNetParam(elasticNetParam)
-        .setSolver(solver)
       MLTestingUtils.testArbitrarilyScaledWeights[LinearRegressionModel, LinearRegression](
         datasetWithStrongNoise.as[LabeledPoint], estimator, modelEquals)
       MLTestingUtils.testOutliersWithSmallWeights[LinearRegressionModel, LinearRegression](

@@ -32,7 +32,7 @@ import org.codehaus.commons.compiler.CompileException
 import org.codehaus.janino.{ByteArrayClassLoader, ClassBodyEvaluator, InternalCompilerException, SimpleCompiler}
 import org.codehaus.janino.util.ClassFile
 
-import org.apache.spark.{TaskContext, TaskKilledException}
+import org.apache.spark.{SparkEnv, TaskContext, TaskKilledException}
 import org.apache.spark.executor.InputMetrics
 import org.apache.spark.internal.Logging
 import org.apache.spark.metrics.source.CodegenMetrics
@@ -40,10 +40,10 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen.Block._
 import org.apache.spark.sql.catalyst.util.{ArrayData, GenericArrayData, MapData}
-import org.apache.spark.sql.catalyst.util.DateTimeUtils._
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.Platform
+import org.apache.spark.unsafe.array.ByteArrayMethods
 import org.apache.spark.unsafe.types._
 import org.apache.spark.util.{ParentClassLoader, Utils}
 
@@ -910,13 +910,12 @@ class CodegenContext {
     val blocks = new ArrayBuffer[String]()
     val blockBuilder = new StringBuilder()
     var length = 0
-    val splitThreshold = SQLConf.get.methodSplitThreshold
     for (code <- expressions) {
       // We can't know how many bytecode will be generated, so use the length of source code
       // as metric. A method should not go beyond 8K, otherwise it will not be JITted, should
       // also not be too small, or it will have many function calls (for wide table), see the
       // results in BenchmarkWideTable.
-      if (length > splitThreshold) {
+      if (length > 1024) {
         blocks += blockBuilder.toString()
         blockBuilder.clear()
         length = 0
@@ -1294,18 +1293,25 @@ object CodeGenerator extends Logging {
       case e: InternalCompilerException =>
         val msg = s"failed to compile: $e"
         logError(msg, e)
-        val maxLines = SQLConf.get.loggingMaxLinesForCodegen
-        logInfo(s"\n${CodeFormatter.format(code, maxLines)}")
+        logGeneratedCode(code)
         throw new InternalCompilerException(msg, e)
       case e: CompileException =>
         val msg = s"failed to compile: $e"
         logError(msg, e)
-        val maxLines = SQLConf.get.loggingMaxLinesForCodegen
-        logInfo(s"\n${CodeFormatter.format(code, maxLines)}")
+        logGeneratedCode(code)
         throw new CompileException(msg, e.getLocation)
     }
 
-    (evaluator.getClazz().getConstructor().newInstance().asInstanceOf[GeneratedClass], maxCodeSize)
+    (evaluator.getClazz().newInstance().asInstanceOf[GeneratedClass], maxCodeSize)
+  }
+
+  private def logGeneratedCode(code: CodeAndComment): Unit = {
+    val maxLines = SQLConf.get.loggingMaxLinesForCodegen
+    if (Utils.isTesting) {
+      logError(s"\n${CodeFormatter.format(code, maxLines)}")
+    } else {
+      logInfo(s"\n${CodeFormatter.format(code, maxLines)}")
+    }
   }
 
   /**
@@ -1376,7 +1382,7 @@ object CodeGenerator extends Logging {
           val startTime = System.nanoTime()
           val result = doCompile(code)
           val endTime = System.nanoTime()
-          def timeMs: Double = (endTime - startTime).toDouble / NANOS_PER_MILLIS
+          def timeMs: Double = (endTime - startTime).toDouble / 1000000
           CodegenMetrics.METRIC_SOURCE_CODE_SIZE.update(code.body.length)
           CodegenMetrics.METRIC_COMPILATION_TIME.update(timeMs.toLong)
           logInfo(s"Code generated in $timeMs ms")

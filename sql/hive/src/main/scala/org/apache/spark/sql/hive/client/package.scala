@@ -31,7 +31,7 @@ package object client {
 
     // Do not need Calcite because we disabled hive.cbo.enable.
     //
-    // The other excluded dependencies are nowhere to be found, so exclude them explicitly. If
+    // The other excluded dependencies are also nowhere to be found, so exclude them explicitly. If
     // they're needed by the metastore client, users will have to dig them out of somewhere and use
     // configuration to point Spark at the correct jars.
     case object v14 extends HiveVersion("0.14.0",
@@ -39,7 +39,7 @@ package object client {
         "org.apache.calcite:calcite-avatica",
         "org.pentaho:pentaho-aggdesigner-algorithm"))
 
-    case object v1_0 extends HiveVersion("1.0.1",
+    case object v1_0 extends HiveVersion("1.0.0",
       exclusions = Seq("eigenbase:eigenbase-properties",
         "org.apache.calcite:calcite-core",
         "org.apache.calcite:calcite-avatica",
@@ -50,7 +50,7 @@ package object client {
     // The curator dependency was added to the exclusions here because it seems to confuse the ivy
     // library. org.apache.curator:curator is a pom dependency but ivy tries to find the jar for it,
     // and fails.
-    case object v1_1 extends HiveVersion("1.1.1",
+    case object v1_1 extends HiveVersion("1.1.0",
       exclusions = Seq("eigenbase:eigenbase-properties",
         "org.apache.calcite:calcite-core",
         "org.apache.calcite:calcite-avatica",

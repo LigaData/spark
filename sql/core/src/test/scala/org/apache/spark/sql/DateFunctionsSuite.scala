@@ -20,7 +20,6 @@ package org.apache.spark.sql
 import java.sql.{Date, Timestamp}
 import java.text.SimpleDateFormat
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.functions._
@@ -406,7 +405,7 @@ class DateFunctionsSuite extends QueryTest with SharedSQLContext {
         Row(Date.valueOf("2014-12-31"))))
     checkAnswer(
       df.select(to_date(col("s"), "yyyy-MM-dd")),
-      Seq(Row(null), Row(Date.valueOf("2014-12-31")), Row(null)))
+      Seq(Row(Date.valueOf("2015-07-22")), Row(Date.valueOf("2014-12-31")), Row(null)))
 
     // now switch format
     checkAnswer(
@@ -516,8 +515,6 @@ class DateFunctionsSuite extends QueryTest with SharedSQLContext {
       Seq(Row(sdf3.format(new Timestamp(1000000))), Row(sdf3.format(new Timestamp(-1000000)))))
   }
 
-  private def secs(millis: Long): Long = TimeUnit.MILLISECONDS.toSeconds(millis)
-
   test("unix_timestamp") {
     val date1 = Date.valueOf("2015-07-24")
     val date2 = Date.valueOf("2015-07-25")
@@ -530,21 +527,21 @@ class DateFunctionsSuite extends QueryTest with SharedSQLContext {
     val fmt = "yyyy/MM/dd HH:mm:ss.S"
     val df = Seq((date1, ts1, s1, ss1), (date2, ts2, s2, ss2)).toDF("d", "ts", "s", "ss")
     checkAnswer(df.select(unix_timestamp(col("ts"))), Seq(
-      Row(secs(ts1.getTime)), Row(secs(ts2.getTime))))
+      Row(ts1.getTime / 1000L), Row(ts2.getTime / 1000L)))
     checkAnswer(df.select(unix_timestamp(col("ss"))), Seq(
-      Row(secs(ts1.getTime)), Row(secs(ts2.getTime))))
+      Row(ts1.getTime / 1000L), Row(ts2.getTime / 1000L)))
     checkAnswer(df.select(unix_timestamp(col("d"), fmt)), Seq(
-      Row(secs(date1.getTime)), Row(secs(date2.getTime))))
+      Row(date1.getTime / 1000L), Row(date2.getTime / 1000L)))
     checkAnswer(df.select(unix_timestamp(col("s"), fmt)), Seq(
-      Row(secs(ts1.getTime)), Row(secs(ts2.getTime))))
+      Row(ts1.getTime / 1000L), Row(ts2.getTime / 1000L)))
     checkAnswer(df.selectExpr("unix_timestamp(ts)"), Seq(
-      Row(secs(ts1.getTime)), Row(secs(ts2.getTime))))
+      Row(ts1.getTime / 1000L), Row(ts2.getTime / 1000L)))
     checkAnswer(df.selectExpr("unix_timestamp(ss)"), Seq(
-      Row(secs(ts1.getTime)), Row(secs(ts2.getTime))))
+      Row(ts1.getTime / 1000L), Row(ts2.getTime / 1000L)))
     checkAnswer(df.selectExpr(s"unix_timestamp(d, '$fmt')"), Seq(
-      Row(secs(date1.getTime)), Row(secs(date2.getTime))))
+      Row(date1.getTime / 1000L), Row(date2.getTime / 1000L)))
     checkAnswer(df.selectExpr(s"unix_timestamp(s, '$fmt')"), Seq(
-      Row(secs(ts1.getTime)), Row(secs(ts2.getTime))))
+      Row(ts1.getTime / 1000L), Row(ts2.getTime / 1000L)))
 
     val x1 = "2015-07-24 10:00:00"
     val x2 = "2015-25-07 02:02:02"
@@ -555,13 +552,13 @@ class DateFunctionsSuite extends QueryTest with SharedSQLContext {
 
     val df1 = Seq(x1, x2, x3, x4).toDF("x")
     checkAnswer(df1.select(unix_timestamp(col("x"))), Seq(
-      Row(secs(ts1.getTime)), Row(null), Row(null), Row(null)))
+      Row(ts1.getTime / 1000L), Row(null), Row(null), Row(null)))
     checkAnswer(df1.selectExpr("unix_timestamp(x)"), Seq(
-      Row(secs(ts1.getTime)), Row(null), Row(null), Row(null)))
+      Row(ts1.getTime / 1000L), Row(null), Row(null), Row(null)))
     checkAnswer(df1.select(unix_timestamp(col("x"), "yyyy-dd-MM HH:mm:ss")), Seq(
-      Row(null), Row(secs(ts2.getTime)), Row(null), Row(null)))
+      Row(null), Row(ts2.getTime / 1000L), Row(null), Row(null)))
     checkAnswer(df1.selectExpr(s"unix_timestamp(x, 'yyyy-MM-dd mm:HH:ss')"), Seq(
-      Row(secs(ts4.getTime)), Row(null), Row(secs(ts3.getTime)), Row(null)))
+      Row(ts4.getTime / 1000L), Row(null), Row(ts3.getTime / 1000L), Row(null)))
 
     // invalid format
     checkAnswer(df1.selectExpr(s"unix_timestamp(x, 'yyyy-MM-dd aa:HH:ss')"), Seq(
@@ -573,12 +570,10 @@ class DateFunctionsSuite extends QueryTest with SharedSQLContext {
     val ts5 = Timestamp.valueOf("2016-02-29 00:00:00")
     val df2 = Seq(y1, y2).toDF("y")
     checkAnswer(df2.select(unix_timestamp(col("y"), "yyyy-MM-dd")), Seq(
-      Row(secs(ts5.getTime)), Row(null)))
+      Row(ts5.getTime / 1000L), Row(null)))
 
     val now = sql("select unix_timestamp()").collect().head.getLong(0)
-    checkAnswer(
-      sql(s"select cast ($now as timestamp)"),
-      Row(new java.util.Date(TimeUnit.SECONDS.toMillis(now))))
+    checkAnswer(sql(s"select cast ($now as timestamp)"), Row(new java.util.Date(now * 1000)))
   }
 
   test("to_unix_timestamp") {
@@ -593,13 +588,13 @@ class DateFunctionsSuite extends QueryTest with SharedSQLContext {
     val fmt = "yyyy/MM/dd HH:mm:ss.S"
     val df = Seq((date1, ts1, s1, ss1), (date2, ts2, s2, ss2)).toDF("d", "ts", "s", "ss")
     checkAnswer(df.selectExpr("to_unix_timestamp(ts)"), Seq(
-      Row(secs(ts1.getTime)), Row(secs(ts2.getTime))))
+      Row(ts1.getTime / 1000L), Row(ts2.getTime / 1000L)))
     checkAnswer(df.selectExpr("to_unix_timestamp(ss)"), Seq(
-      Row(secs(ts1.getTime)), Row(secs(ts2.getTime))))
+      Row(ts1.getTime / 1000L), Row(ts2.getTime / 1000L)))
     checkAnswer(df.selectExpr(s"to_unix_timestamp(d, '$fmt')"), Seq(
-      Row(secs(date1.getTime)), Row(secs(date2.getTime))))
+      Row(date1.getTime / 1000L), Row(date2.getTime / 1000L)))
     checkAnswer(df.selectExpr(s"to_unix_timestamp(s, '$fmt')"), Seq(
-      Row(secs(ts1.getTime)), Row(secs(ts2.getTime))))
+      Row(ts1.getTime / 1000L), Row(ts2.getTime / 1000L)))
 
     val x1 = "2015-07-24 10:00:00"
     val x2 = "2015-25-07 02:02:02"
@@ -610,9 +605,9 @@ class DateFunctionsSuite extends QueryTest with SharedSQLContext {
 
     val df1 = Seq(x1, x2, x3, x4).toDF("x")
     checkAnswer(df1.selectExpr("to_unix_timestamp(x)"), Seq(
-      Row(secs(ts1.getTime)), Row(null), Row(null), Row(null)))
+      Row(ts1.getTime / 1000L), Row(null), Row(null), Row(null)))
     checkAnswer(df1.selectExpr(s"to_unix_timestamp(x, 'yyyy-MM-dd mm:HH:ss')"), Seq(
-      Row(secs(ts4.getTime)), Row(null), Row(secs(ts3.getTime)), Row(null)))
+      Row(ts4.getTime / 1000L), Row(null), Row(ts3.getTime / 1000L), Row(null)))
 
     // february
     val y1 = "2016-02-29"
@@ -620,7 +615,7 @@ class DateFunctionsSuite extends QueryTest with SharedSQLContext {
     val ts5 = Timestamp.valueOf("2016-02-29 00:00:00")
     val df2 = Seq(y1, y2).toDF("y")
     checkAnswer(df2.select(unix_timestamp(col("y"), "yyyy-MM-dd")), Seq(
-      Row(secs(ts5.getTime)), Row(null)))
+      Row(ts5.getTime / 1000L), Row(null)))
 
     // invalid format
     checkAnswer(df1.selectExpr(s"to_unix_timestamp(x, 'yyyy-MM-dd bb:HH:ss')"), Seq(
@@ -733,5 +728,20 @@ class DateFunctionsSuite extends QueryTest with SharedSQLContext {
       Seq(
         Row(Timestamp.valueOf("2015-07-24 07:00:00")),
         Row(Timestamp.valueOf("2015-07-24 22:00:00"))))
+  }
+
+  test("SPARK-30793, SPARK-30857: truncate timestamps before the epoch") {
+    def checkTrunc(level: String, expected: String): Unit = {
+      val df = Seq("1961-04-12 00:01:02.345")
+        .toDF()
+        .select($"value".cast("timestamp").as("ts"))
+        .select(date_trunc(level, $"ts").cast("string"))
+      checkAnswer(df, Row(expected))
+    }
+
+    checkTrunc("SECOND", "1961-04-12 00:01:02")
+    checkTrunc("MINUTE", "1961-04-12 00:01:00")
+    checkTrunc("HOUR", "1961-04-12 00:00:00")
+    checkTrunc("DAY", "1961-04-12 00:00:00")
   }
 }

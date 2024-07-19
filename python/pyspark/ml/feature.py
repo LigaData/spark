@@ -44,7 +44,8 @@ __all__ = ['Binarizer',
            'MinMaxScaler', 'MinMaxScalerModel',
            'NGram',
            'Normalizer',
-           'OneHotEncoder', 'OneHotEncoderModel',
+           'OneHotEncoder',
+           'OneHotEncoderEstimator', 'OneHotEncoderModel',
            'PCA', 'PCAModel',
            'PolynomialExpansion',
            'QuantileDiscretizer',
@@ -86,9 +87,7 @@ class Binarizer(JavaTransformer, HasInputCol, HasOutputCol, JavaMLReadable, Java
     """
 
     threshold = Param(Params._dummy(), "threshold",
-                      "Param for threshold used to binarize continuous features. " +
-                      "The features greater than the threshold will be binarized to 1.0. " +
-                      "The features equal to or less than the threshold will be binarized to 0.0",
+                      "threshold in binary classification prediction, in range [0, 1]",
                       typeConverter=TypeConverters.toFloat)
 
     @keyword_only
@@ -373,9 +372,8 @@ class Bucketizer(JavaTransformer, HasInputCol, HasOutputCol, HasHandleInvalid,
               "splits specified will be treated as errors.",
               typeConverter=TypeConverters.toListFloat)
 
-    handleInvalid = Param(Params._dummy(), "handleInvalid", "how to handle invalid entries "
-                          "containing NaN values. Values outside the splits will always be treated "
-                          "as errors. Options are 'skip' (filter out rows with invalid values), " +
+    handleInvalid = Param(Params._dummy(), "handleInvalid", "how to handle invalid entries. " +
+                          "Options are 'skip' (filter out rows with invalid values), " +
                           "'error' (throw an error), or 'keep' (keep invalid values in a special " +
                           "additional bucket).",
                           typeConverter=TypeConverters.toString)
@@ -968,10 +966,6 @@ class IDF(JavaEstimator, HasInputCol, HasOutputCol, JavaMLReadable, JavaMLWritab
     >>> model = idf.fit(df)
     >>> model.idf
     DenseVector([0.0, 0.0])
-    >>> model.docFreq
-    [0, 3]
-    >>> model.numDocs == df.count()
-    True
     >>> model.transform(df).head().idf
     DenseVector([0.0, 0.0])
     >>> idf.setParams(outputCol="freqs").fit(df).transform(df).collect()[1].freqs
@@ -1050,22 +1044,6 @@ class IDFModel(JavaModel, JavaMLReadable, JavaMLWritable):
         Returns the IDF vector.
         """
         return self._call_java("idf")
-
-    @property
-    @since("3.0.0")
-    def docFreq(self):
-        """
-        Returns the document frequency.
-        """
-        return self._call_java("docFreq")
-
-    @property
-    @since("3.0.0")
-    def numDocs(self):
-        """
-        Returns number of documents evaluated to compute idf
-        """
-        return self._call_java("numDocs")
 
 
 @inherit_doc
@@ -1674,39 +1652,122 @@ class Normalizer(JavaTransformer, HasInputCol, HasOutputCol, JavaMLReadable, Jav
 
 
 @inherit_doc
-class OneHotEncoder(JavaEstimator, HasInputCols, HasOutputCols, HasHandleInvalid,
-                    JavaMLReadable, JavaMLWritable):
+class OneHotEncoder(JavaTransformer, HasInputCol, HasOutputCol, JavaMLReadable, JavaMLWritable):
+    """
+    A one-hot encoder that maps a column of category indices to a
+    column of binary vectors, with at most a single one-value per row
+    that indicates the input category index.
+    For example with 5 categories, an input value of 2.0 would map to
+    an output vector of `[0.0, 0.0, 1.0, 0.0]`.
+    The last category is not included by default (configurable via
+    :py:attr:`dropLast`) because it makes the vector entries sum up to
+    one, and hence linearly dependent.
+    So an input value of 4.0 maps to `[0.0, 0.0, 0.0, 0.0]`.
+
+    .. note:: This is different from scikit-learn's OneHotEncoder,
+        which keeps all categories. The output vectors are sparse.
+
+    .. note:: Deprecated in 2.3.0. :py:class:`OneHotEncoderEstimator` will be renamed to
+        :py:class:`OneHotEncoder` and this :py:class:`OneHotEncoder` will be removed in 3.0.0.
+
+    .. seealso::
+
+       :py:class:`StringIndexer` for converting categorical values into
+       category indices
+
+    >>> stringIndexer = StringIndexer(inputCol="label", outputCol="indexed")
+    >>> model = stringIndexer.fit(stringIndDf)
+    >>> td = model.transform(stringIndDf)
+    >>> encoder = OneHotEncoder(inputCol="indexed", outputCol="features")
+    >>> encoder.transform(td).head().features
+    SparseVector(2, {0: 1.0})
+    >>> encoder.setParams(outputCol="freqs").transform(td).head().freqs
+    SparseVector(2, {0: 1.0})
+    >>> params = {encoder.dropLast: False, encoder.outputCol: "test"}
+    >>> encoder.transform(td, params).head().test
+    SparseVector(3, {0: 1.0})
+    >>> onehotEncoderPath = temp_path + "/onehot-encoder"
+    >>> encoder.save(onehotEncoderPath)
+    >>> loadedEncoder = OneHotEncoder.load(onehotEncoderPath)
+    >>> loadedEncoder.getDropLast() == encoder.getDropLast()
+    True
+
+    .. versionadded:: 1.4.0
+    """
+
+    dropLast = Param(Params._dummy(), "dropLast", "whether to drop the last category",
+                     typeConverter=TypeConverters.toBoolean)
+
+    @keyword_only
+    def __init__(self, dropLast=True, inputCol=None, outputCol=None):
+        """
+        __init__(self, dropLast=True, inputCol=None, outputCol=None)
+        """
+        super(OneHotEncoder, self).__init__()
+        self._java_obj = self._new_java_obj("org.apache.spark.ml.feature.OneHotEncoder", self.uid)
+        self._setDefault(dropLast=True)
+        kwargs = self._input_kwargs
+        self.setParams(**kwargs)
+
+    @keyword_only
+    @since("1.4.0")
+    def setParams(self, dropLast=True, inputCol=None, outputCol=None):
+        """
+        setParams(self, dropLast=True, inputCol=None, outputCol=None)
+        Sets params for this OneHotEncoder.
+        """
+        kwargs = self._input_kwargs
+        return self._set(**kwargs)
+
+    @since("1.4.0")
+    def setDropLast(self, value):
+        """
+        Sets the value of :py:attr:`dropLast`.
+        """
+        return self._set(dropLast=value)
+
+    @since("1.4.0")
+    def getDropLast(self):
+        """
+        Gets the value of dropLast or its default value.
+        """
+        return self.getOrDefault(self.dropLast)
+
+
+@inherit_doc
+class OneHotEncoderEstimator(JavaEstimator, HasInputCols, HasOutputCols, HasHandleInvalid,
+                             JavaMLReadable, JavaMLWritable):
     """
     A one-hot encoder that maps a column of category indices to a column of binary vectors, with
     at most a single one-value per row that indicates the input category index.
     For example with 5 categories, an input value of 2.0 would map to an output vector of
     `[0.0, 0.0, 1.0, 0.0]`.
-    The last category is not included by default (configurable via :py:attr:`dropLast`),
+    The last category is not included by default (configurable via `dropLast`),
     because it makes the vector entries sum up to one, and hence linearly dependent.
     So an input value of 4.0 maps to `[0.0, 0.0, 0.0, 0.0]`.
 
-    .. note:: This is different from scikit-learn's OneHotEncoder, which keeps all categories.
-        The output vectors are sparse.
+    Note: This is different from scikit-learn's OneHotEncoder, which keeps all categories.
+    The output vectors are sparse.
 
-    When :py:attr:`handleInvalid` is configured to 'keep', an extra "category" indicating invalid
-    values is added as last category. So when :py:attr:`dropLast` is true, invalid values are
-    encoded as all-zeros vector.
+    When `handleInvalid` is configured to 'keep', an extra "category" indicating invalid values is
+    added as last category. So when `dropLast` is true, invalid values are encoded as all-zeros
+    vector.
 
-    .. note:: When encoding multi-column by using :py:attr:`inputCols` and
-        :py:attr:`outputCols` params, input/output cols come in pairs, specified by the order in
-        the arrays, and each pair is treated independently.
+    Note: When encoding multi-column by using `inputCols` and `outputCols` params, input/output
+    cols come in pairs, specified by the order in the arrays, and each pair is treated
+    independently.
 
-    .. seealso:: :py:class:`StringIndexer` for converting categorical values into category indices
+    See `StringIndexer` for converting categorical values into category indices
 
     >>> from pyspark.ml.linalg import Vectors
     >>> df = spark.createDataFrame([(0.0,), (1.0,), (2.0,)], ["input"])
-    >>> ohe = OneHotEncoder(inputCols=["input"], outputCols=["output"])
+    >>> ohe = OneHotEncoderEstimator(inputCols=["input"], outputCols=["output"])
     >>> model = ohe.fit(df)
     >>> model.transform(df).head().output
     SparseVector(2, {0: 1.0})
-    >>> ohePath = temp_path + "/ohe"
+    >>> ohePath = temp_path + "/oheEstimator"
     >>> ohe.save(ohePath)
-    >>> loadedOHE = OneHotEncoder.load(ohePath)
+    >>> loadedOHE = OneHotEncoderEstimator.load(ohePath)
     >>> loadedOHE.getInputCols() == ohe.getInputCols()
     True
     >>> modelPath = temp_path + "/ohe-model"
@@ -1733,9 +1794,9 @@ class OneHotEncoder(JavaEstimator, HasInputCols, HasOutputCols, HasHandleInvalid
         """
         __init__(self, inputCols=None, outputCols=None, handleInvalid="error", dropLast=True)
         """
-        super(OneHotEncoder, self).__init__()
+        super(OneHotEncoderEstimator, self).__init__()
         self._java_obj = self._new_java_obj(
-            "org.apache.spark.ml.feature.OneHotEncoder", self.uid)
+            "org.apache.spark.ml.feature.OneHotEncoderEstimator", self.uid)
         self._setDefault(handleInvalid="error", dropLast=True)
         kwargs = self._input_kwargs
         self.setParams(**kwargs)
@@ -1745,7 +1806,7 @@ class OneHotEncoder(JavaEstimator, HasInputCols, HasOutputCols, HasHandleInvalid
     def setParams(self, inputCols=None, outputCols=None, handleInvalid="error", dropLast=True):
         """
         setParams(self, inputCols=None, outputCols=None, handleInvalid="error", dropLast=True)
-        Sets params for this OneHotEncoder.
+        Sets params for this OneHotEncoderEstimator.
         """
         kwargs = self._input_kwargs
         return self._set(**kwargs)
@@ -1770,7 +1831,7 @@ class OneHotEncoder(JavaEstimator, HasInputCols, HasOutputCols, HasHandleInvalid
 
 class OneHotEncoderModel(JavaModel, JavaMLReadable, JavaMLWritable):
     """
-    Model fitted by :py:class:`OneHotEncoder`.
+    Model fitted by :py:class:`OneHotEncoderEstimator`.
 
     .. versionadded:: 2.3.0
     """
@@ -2292,8 +2353,7 @@ class StandardScalerModel(JavaModel, JavaMLReadable, JavaMLWritable):
         return self._call_java("mean")
 
 
-class _StringIndexerParams(JavaParams, HasHandleInvalid, HasInputCol, HasOutputCol,
-                           HasInputCols, HasOutputCols):
+class _StringIndexerParams(JavaParams, HasHandleInvalid, HasInputCol, HasOutputCol):
     """
     Params for :py:attr:`StringIndexer` and :py:attr:`StringIndexerModel`.
     """
@@ -2301,10 +2361,7 @@ class _StringIndexerParams(JavaParams, HasHandleInvalid, HasInputCol, HasOutputC
     stringOrderType = Param(Params._dummy(), "stringOrderType",
                             "How to order labels of string column. The first label after " +
                             "ordering is assigned an index of 0. Supported options: " +
-                            "frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. " +
-                            "Default is frequencyDesc. In case of equal frequency when " +
-                            "under frequencyDesc/Asc, the strings are further sorted " +
-                            "alphabetically",
+                            "frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc.",
                             typeConverter=TypeConverters.toString)
 
     handleInvalid = Param(Params._dummy(), "handleInvalid", "how to handle invalid data (unseen " +
@@ -2377,37 +2434,16 @@ class StringIndexer(JavaEstimator, _StringIndexerParams, JavaMLReadable, JavaMLW
     >>> sorted(set([(i[0], i[1]) for i in result.select(result.id, result.indexed).collect()]),
     ...     key=lambda x: x[0])
     [(0, 0.0), (1, 1.0), (2, 2.0), (3, 0.0), (4, 0.0), (5, 2.0)]
-    >>> testData = sc.parallelize([Row(id=0, label1="a", label2="e"),
-    ...                            Row(id=1, label1="b", label2="f"),
-    ...                            Row(id=2, label1="c", label2="e"),
-    ...                            Row(id=3, label1="a", label2="f"),
-    ...                            Row(id=4, label1="a", label2="f"),
-    ...                            Row(id=5, label1="c", label2="f")], 3)
-    >>> multiRowDf = spark.createDataFrame(testData)
-    >>> inputs = ["label1", "label2"]
-    >>> outputs = ["index1", "index2"]
-    >>> stringIndexer = StringIndexer(inputCols=inputs, outputCols=outputs)
-    >>> model = stringIndexer.fit(multiRowDf)
-    >>> result = model.transform(multiRowDf)
-    >>> sorted(set([(i[0], i[1], i[2]) for i in result.select(result.id, result.index1,
-    ...     result.index2).collect()]), key=lambda x: x[0])
-    [(0, 0.0, 1.0), (1, 2.0, 0.0), (2, 1.0, 1.0), (3, 0.0, 0.0), (4, 0.0, 0.0), (5, 1.0, 0.0)]
-    >>> fromlabelsModel = StringIndexerModel.from_arrays_of_labels([["a", "b", "c"], ["e", "f"]],
-    ...     inputCols=inputs, outputCols=outputs)
-    >>> result = fromlabelsModel.transform(multiRowDf)
-    >>> sorted(set([(i[0], i[1], i[2]) for i in result.select(result.id, result.index1,
-    ...     result.index2).collect()]), key=lambda x: x[0])
-    [(0, 0.0, 0.0), (1, 1.0, 1.0), (2, 2.0, 0.0), (3, 0.0, 1.0), (4, 0.0, 1.0), (5, 2.0, 1.0)]
 
     .. versionadded:: 1.4.0
     """
 
     @keyword_only
-    def __init__(self, inputCol=None, outputCol=None, inputCols=None, outputCols=None,
-                 handleInvalid="error", stringOrderType="frequencyDesc"):
+    def __init__(self, inputCol=None, outputCol=None, handleInvalid="error",
+                 stringOrderType="frequencyDesc"):
         """
-        __init__(self, inputCol=None, outputCol=None, inputCols=None, outputCols=None, \
-                 handleInvalid="error", stringOrderType="frequencyDesc")
+        __init__(self, inputCol=None, outputCol=None, handleInvalid="error", \
+                 stringOrderType="frequencyDesc")
         """
         super(StringIndexer, self).__init__()
         self._java_obj = self._new_java_obj("org.apache.spark.ml.feature.StringIndexer", self.uid)
@@ -2416,11 +2452,11 @@ class StringIndexer(JavaEstimator, _StringIndexerParams, JavaMLReadable, JavaMLW
 
     @keyword_only
     @since("1.4.0")
-    def setParams(self, inputCol=None, outputCol=None, inputCols=None, outputCols=None,
-                  handleInvalid="error", stringOrderType="frequencyDesc"):
+    def setParams(self, inputCol=None, outputCol=None, handleInvalid="error",
+                  stringOrderType="frequencyDesc"):
         """
-        setParams(self, inputCol=None, outputCol=None, inputCols=None, outputCols=None, \
-                  handleInvalid="error", stringOrderType="frequencyDesc")
+        setParams(self, inputCol=None, outputCol=None, handleInvalid="error", \
+                  stringOrderType="frequencyDesc")
         Sets params for this StringIndexer.
         """
         kwargs = self._input_kwargs
@@ -2459,26 +2495,6 @@ class StringIndexerModel(JavaModel, _StringIndexerParams, JavaMLReadable, JavaML
         model.setInputCol(inputCol)
         if outputCol is not None:
             model.setOutputCol(outputCol)
-        if handleInvalid is not None:
-            model.setHandleInvalid(handleInvalid)
-        return model
-
-    @classmethod
-    @since("3.0.0")
-    def from_arrays_of_labels(cls, arrayOfLabels, inputCols, outputCols=None,
-                              handleInvalid=None):
-        """
-        Construct the model directly from an array of array of label strings,
-        requires an active SparkContext.
-        """
-        sc = SparkContext._active_spark_context
-        java_class = sc._gateway.jvm.java.lang.String
-        jlabels = StringIndexerModel._new_java_array(arrayOfLabels, java_class)
-        model = StringIndexerModel._create_from_java_class(
-            "org.apache.spark.ml.feature.StringIndexerModel", jlabels)
-        model.setInputCols(inputCols)
-        if outputCols is not None:
-            model.setOutputCols(outputCols)
         if handleInvalid is not None:
             model.setHandleInvalid(handleInvalid)
         return model

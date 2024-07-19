@@ -127,7 +127,6 @@ public class JavaSQLDataSourceExample {
     usersDF.write().format("orc")
       .option("orc.bloom.filter.columns", "favorite_color")
       .option("orc.dictionary.key.threshold", "1.0")
-      .option("orc.column.encoding.direct", "name")
       .save("users_with_options.orc");
     // $example off:manual_save_options_orc$
     // $example on:direct_sql$

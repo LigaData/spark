@@ -17,19 +17,22 @@
 
 package test.org.apache.spark.sql.sources.v2;
 
-import org.apache.spark.sql.sources.v2.Table;
-import org.apache.spark.sql.sources.v2.TableProvider;
-import org.apache.spark.sql.sources.v2.reader.*;
+import java.util.List;
+
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.sources.v2.DataSourceOptions;
+import org.apache.spark.sql.sources.v2.DataSourceV2;
+import org.apache.spark.sql.sources.v2.ReadSupport;
+import org.apache.spark.sql.sources.v2.reader.DataSourceReader;
+import org.apache.spark.sql.sources.v2.reader.InputPartition;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
-public class JavaSchemaRequiredDataSource implements TableProvider {
+public class JavaSchemaRequiredDataSource implements DataSourceV2, ReadSupport {
 
-  class MyScanBuilder extends JavaSimpleScanBuilder {
+  class Reader implements DataSourceReader {
+    private final StructType schema;
 
-    private StructType schema;
-
-    MyScanBuilder(StructType schema) {
+    Reader(StructType schema) {
       this.schema = schema;
     }
 
@@ -39,29 +42,18 @@ public class JavaSchemaRequiredDataSource implements TableProvider {
     }
 
     @Override
-    public InputPartition[] planInputPartitions() {
-      return new InputPartition[0];
+    public List<InputPartition<InternalRow>> planInputPartitions() {
+      return java.util.Collections.emptyList();
     }
   }
 
   @Override
-  public Table getTable(CaseInsensitiveStringMap options, StructType schema) {
-    return new JavaSimpleBatchTable() {
-
-      @Override
-      public StructType schema() {
-        return schema;
-      }
-
-      @Override
-      public ScanBuilder newScanBuilder(CaseInsensitiveStringMap options) {
-        return new MyScanBuilder(schema);
-      }
-    };
+  public DataSourceReader createReader(DataSourceOptions options) {
+    throw new IllegalArgumentException("requires a user-supplied schema");
   }
 
   @Override
-  public Table getTable(CaseInsensitiveStringMap options) {
-    throw new IllegalArgumentException("requires a user-supplied schema");
+  public DataSourceReader createReader(StructType schema, DataSourceOptions options) {
+    return new Reader(schema);
   }
 }

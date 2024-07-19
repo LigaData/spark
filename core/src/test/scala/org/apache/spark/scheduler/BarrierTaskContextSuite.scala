@@ -20,7 +20,6 @@ package org.apache.spark.scheduler
 import scala.util.Random
 
 import org.apache.spark._
-import org.apache.spark.internal.config.Tests.TEST_NO_STAGE_RETRY
 
 class BarrierTaskContextSuite extends SparkFunSuite with LocalSparkContext {
 
@@ -77,7 +76,7 @@ class BarrierTaskContextSuite extends SparkFunSuite with LocalSparkContext {
   test("throw exception on barrier() call timeout") {
     val conf = new SparkConf()
       .set("spark.barrier.sync.timeout", "1")
-      .set(TEST_NO_STAGE_RETRY, true)
+      .set("spark.test.noStageRetry", "true")
       .setMaster("local-cluster[4, 1, 1024]")
       .setAppName("test-cluster")
     sc = new SparkContext(conf)
@@ -102,7 +101,7 @@ class BarrierTaskContextSuite extends SparkFunSuite with LocalSparkContext {
   test("throw exception if barrier() call doesn't happen on every task") {
     val conf = new SparkConf()
       .set("spark.barrier.sync.timeout", "1")
-      .set(TEST_NO_STAGE_RETRY, true)
+      .set("spark.test.noStageRetry", "true")
       .setMaster("local-cluster[4, 1, 1024]")
       .setAppName("test-cluster")
     sc = new SparkContext(conf)
@@ -125,7 +124,7 @@ class BarrierTaskContextSuite extends SparkFunSuite with LocalSparkContext {
   test("throw exception if the number of barrier() calls are not the same on every task") {
     val conf = new SparkConf()
       .set("spark.barrier.sync.timeout", "1")
-      .set(TEST_NO_STAGE_RETRY, true)
+      .set("spark.test.noStageRetry", "true")
       .setMaster("local-cluster[4, 1, 1024]")
       .setAppName("test-cluster")
     sc = new SparkContext(conf)
@@ -152,5 +151,28 @@ class BarrierTaskContextSuite extends SparkFunSuite with LocalSparkContext {
     }.getMessage
     assert(error.contains("The coordinator didn't get all barrier sync requests"))
     assert(error.contains("within 1 second(s)"))
+  }
+
+  // Disabled as it is flaky in GitHub Actions.
+  ignore("SPARK-31485: barrier stage should fail if only partial tasks are launched") {
+    val conf = new SparkConf()
+      .setMaster("local-cluster[2, 1, 1024]")
+      .setAppName("test-cluster")
+      .set("spark.test.noStageRetry", "true")
+    sc = new SparkContext(conf)
+    TestUtils.waitUntilExecutorsUp(sc, 2, 6000)
+    val id = sc.getExecutorIds().head
+    val rdd0 = sc.parallelize(Seq(0, 1, 2, 3), 2)
+    val dep = new OneToOneDependency[Int](rdd0)
+    // set up a barrier stage with 2 tasks and both tasks prefer the same executor (only 1 core) for
+    // scheduling. So, one of tasks won't be scheduled in one round of resource offer.
+    val rdd = new MyRDD(sc, 2, List(dep), Seq(Seq(s"executor_h_$id"), Seq(s"executor_h_$id")))
+    val errorMsg = intercept[SparkException] {
+      rdd.barrier().mapPartitions { iter =>
+        BarrierTaskContext.get().barrier()
+        iter
+      }.collect()
+    }.getMessage
+    assert(errorMsg.contains("Fail resource offers for barrier stage"))
   }
 }

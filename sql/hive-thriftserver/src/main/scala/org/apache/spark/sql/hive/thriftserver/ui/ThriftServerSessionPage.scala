@@ -39,7 +39,8 @@ private[ui] class ThriftServerSessionPage(parent: ThriftServerTab)
 
   /** Render the page */
   def render(request: HttpServletRequest): Seq[Node] = {
-    val parameterId = request.getParameter("id")
+    // stripXSS is called first to remove suspicious characters used in XSS attacks
+    val parameterId = UIUtils.stripXSS(request.getParameter("id"))
     require(parameterId != null && parameterId.nonEmpty, "Missing id parameter")
 
     val content =
@@ -57,7 +58,7 @@ private[ui] class ThriftServerSessionPage(parent: ThriftServerTab)
         </h4> ++
         generateSQLStatsTable(request, sessionStat.sessionId)
       }
-    UIUtils.headerSparkPage(request, "JDBC/ODBC Session", content, parent)
+    UIUtils.headerSparkPage(request, "JDBC/ODBC Session", content, parent, Some(5000))
   }
 
   /** Generate basic stats of the thrift server program */
@@ -99,7 +100,8 @@ private[ui] class ThriftServerSessionPage(parent: ThriftServerTab)
           <td>{info.groupId}</td>
           <td>{formatDate(info.startTimestamp)}</td>
           <td>{formatDate(info.finishTimestamp)}</td>
-          <td>{formatDurationOption(Some(info.totalTime))}</td>
+          <td sorttable_customkey={info.totalTime.toString}>
+            {formatDurationOption(Some(info.totalTime))}</td>
           <td>{info.statement}</td>
           <td>{info.state}</td>
           {errorMessageCell(detail)}

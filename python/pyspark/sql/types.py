@@ -752,7 +752,7 @@ _all_complex_types = dict((v.typeName(), v)
                           for v in [ArrayType, MapType, StructType])
 
 
-_FIXED_DECIMAL = re.compile(r"decimal\(\s*(\d+)\s*,\s*(-?\d+)\s*\)")
+_FIXED_DECIMAL = re.compile(r"decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)")
 
 
 def _parse_datatype_string(s):
@@ -865,8 +865,6 @@ def _parse_datatype_json_string(json_string):
     >>> complex_maptype = MapType(complex_structtype,
     ...                           complex_arraytype, False)
     >>> check_datatype(complex_maptype)
-    >>> # Decimal with negative scale.
-    >>> check_datatype(DecimalType(1,-1))
     """
     return _parse_datatype_json_value(json.loads(json_string))
 
@@ -1020,12 +1018,14 @@ def _infer_type(obj):
         for key, value in obj.items():
             if key is not None and value is not None:
                 return MapType(_infer_type(key), _infer_type(value), True)
-        return MapType(NullType(), NullType(), True)
+        else:
+            return MapType(NullType(), NullType(), True)
     elif isinstance(obj, list):
         for v in obj:
             if v is not None:
                 return ArrayType(_infer_type(obj[0]), True)
-        return ArrayType(NullType(), True)
+        else:
+            return ArrayType(NullType(), True)
     elif isinstance(obj, array):
         if obj.typecode in _array_type_mappings:
             return ArrayType(_array_type_mappings[obj.typecode](), False)
@@ -1466,6 +1466,12 @@ class Row(tuple):
 
         :param recursive: turns the nested Row as dict (default: False).
 
+        .. note:: If a row contains duplicate field names, e.g., the rows of a join
+            between two :class:`DataFrame` that both have the fields of same names,
+            one of the duplicate fields will be selected by ``asDict``. ``__getitem__``
+            will also return one of the duplicate fields, however returned value might
+            be different to ``asDict``.
+
         >>> Row(name="Alice", age=11).asDict() == {'name': 'Alice', 'age': 11}
         True
         >>> row = Row(key=1, value=Row(name='a', age=2))
@@ -1613,15 +1619,9 @@ def to_arrow_type(dt):
         # Timestamps should be in UTC, JVM Arrow timestamps require a timezone to be read
         arrow_type = pa.timestamp('us', tz='UTC')
     elif type(dt) == ArrayType:
-        if type(dt.elementType) in [StructType, TimestampType]:
+        if type(dt.elementType) == TimestampType:
             raise TypeError("Unsupported type in conversion to Arrow: " + str(dt))
         arrow_type = pa.list_(to_arrow_type(dt.elementType))
-    elif type(dt) == StructType:
-        if any(type(field.dataType) == StructType for field in dt):
-            raise TypeError("Nested StructType not supported in conversion to Arrow")
-        fields = [pa.field(field.name, to_arrow_type(field.dataType), nullable=field.nullable)
-                  for field in dt]
-        arrow_type = pa.struct(fields)
     else:
         raise TypeError("Unsupported type in conversion to Arrow: " + str(dt))
     return arrow_type
@@ -1687,52 +1687,31 @@ def from_arrow_schema(arrow_schema):
          for field in arrow_schema])
 
 
-def _arrow_column_to_pandas(column, data_type):
-    """ Convert Arrow Column to pandas Series.
-
-    :param series: pyarrow.lib.Column
-    :param data_type: a Spark data type for the column
+def _check_series_convert_date(series, data_type):
     """
-    import pandas as pd
-    import pyarrow as pa
-    from distutils.version import LooseVersion
-    # If the given column is a date type column, creates a series of datetime.date directly instead
-    # of creating datetime64[ns] as intermediate data to avoid overflow caused by datetime64[ns]
-    # type handling.
-    if LooseVersion(pa.__version__) < LooseVersion("0.11.0"):
-        if type(data_type) == DateType:
-            return pd.Series(column.to_pylist(), name=column.name)
-        else:
-            return column.to_pandas()
+    Cast the series to datetime.date if it's a date type, otherwise returns the original series.
+
+    :param series: pandas.Series
+    :param data_type: a Spark data type for the series
+    """
+    if type(data_type) == DateType:
+        return series.dt.date
     else:
-        # Since Arrow 0.11.0, support date_as_object to return datetime.date instead of
-        # np.datetime64.
-        return column.to_pandas(date_as_object=True)
+        return series
 
 
-def _arrow_table_to_pandas(table, schema):
-    """ Convert Arrow Table to pandas DataFrame.
+def _check_dataframe_convert_date(pdf, schema):
+    """ Correct date type value to use datetime.date.
 
     Pandas DataFrame created from PyArrow uses datetime64[ns] for date type values, but we should
     use datetime.date to match the behavior with when Arrow optimization is disabled.
 
-    :param table: pyarrow.lib.Table
-    :param schema: a Spark schema of the pyarrow.lib.Table
+    :param pdf: pandas.DataFrame
+    :param schema: a Spark schema of the pandas.DataFrame
     """
-    import pandas as pd
-    import pyarrow as pa
-    from distutils.version import LooseVersion
-    # If the given table contains a date type column, use `_arrow_column_to_pandas` for pyarrow<0.11
-    # or use `date_as_object` option for pyarrow>=0.11 to avoid creating datetime64[ns] as
-    # intermediate data.
-    if LooseVersion(pa.__version__) < LooseVersion("0.11.0"):
-        if any(type(field.dataType) == DateType for field in schema):
-            return pd.concat([_arrow_column_to_pandas(column, field.dataType)
-                              for column, field in zip(table.itercolumns(), schema)], axis=1)
-        else:
-            return table.to_pandas()
-    else:
-        return table.to_pandas(date_as_object=True)
+    for field in schema:
+        pdf[field.name] = _check_series_convert_date(pdf[field.name], field.dataType)
+    return pdf
 
 
 def _get_local_timezone():

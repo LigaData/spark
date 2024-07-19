@@ -12,7 +12,7 @@ Structured Streaming is a scalable and fault-tolerant stream processing engine b
 
 Internally, by default, Structured Streaming queries are processed using a *micro-batch processing* engine, which processes data streams as a series of small batch jobs thereby achieving end-to-end latencies as low as 100 milliseconds and exactly-once fault-tolerance guarantees. However, since Spark 2.3, we have introduced a new low-latency processing mode called **Continuous Processing**, which can achieve end-to-end latencies as low as 1 millisecond with at-least-once guarantees. Without changing the Dataset/DataFrame operations in your queries, you will be able to choose the mode based on your application requirements. 
 
-In this guide, we are going to walk you through the programming model and the APIs. We are going to explain the concepts mostly using the default micro-batch processing model, and then [later](#continuous-processing-experimental) discuss Continuous Processing model. First, let's start with a simple example of a Structured Streaming query - a streaming word count.
+In this guide, we are going to walk you through the programming model and the APIs. We are going to explain the concepts mostly using the default micro-batch processing model, and then [later](#continuous-processing) discuss Continuous Processing model. First, let's start with a simple example of a Structured Streaming query - a streaming word count.
 
 # Quick Example
 Let’s say you want to maintain a running word count of text data received from a data server listening on a TCP socket. Let’s see how you can express this using Structured Streaming. You can see the full code in
@@ -497,7 +497,7 @@ There are a few built-in sources.
 
   - **File source** - Reads files written in a directory as a stream of data. Supported file formats are text, csv, json, orc, parquet. See the docs of the DataStreamReader interface for a more up-to-date list, and supported options for each file format. Note that the files must be atomically placed in the given directory, which in most file systems, can be achieved by file move operations.
 
-  - **Kafka source** - Reads data from Kafka. It's compatible with Kafka broker versions 0.10.0 or higher. See the [Kafka Integration Guide](structured-streaming-kafka-0-10-integration.html) for more details.
+  - **Kafka source** - Reads data from Kafka. It's compatible with Kafka broker versions 0.10.0 or higher. See the [Kafka Integration Guide](structured-streaming-kafka-integration.html) for more details.
 
   - **Socket source (for testing)** - Reads UTF8 text data from a socket connection. The listening server socket is at the driver. Note that this should be used only for testing as this does not provide end-to-end fault-tolerance guarantees. 
 
@@ -566,7 +566,7 @@ Here are the details of all the sources in Spark.
   <tr>
     <td><b>Kafka Source</b></td>
     <td>
-        See the <a href="structured-streaming-kafka-0-10-integration.html">Kafka Integration Guide</a>.
+        See the <a href="structured-streaming-kafka-integration.html">Kafka Integration Guide</a>.
     </td>
     <td>Yes</td>
     <td></td>
@@ -957,8 +957,8 @@ Dataset<Row> words = ... // streaming DataFrame of schema { timestamp: Timestamp
 Dataset<Row> windowedCounts = words
     .withWatermark("timestamp", "10 minutes")
     .groupBy(
-        functions.window(words.col("timestamp"), "10 minutes", "5 minutes"),
-        words.col("word"))
+        window(col("timestamp"), "10 minutes", "5 minutes"),
+        col("word"))
     .count();
 {% endhighlight %}
 
@@ -1480,9 +1480,9 @@ Additional details on supported joins:
 
 - Joins can be cascaded, that is, you can do `df1.join(df2, ...).join(df3, ...).join(df4, ....)`.
 
-- As of Spark 2.3, you can use joins only when the query is in Append output mode. Other output modes are not yet supported.
+- As of Spark 2.4, you can use joins only when the query is in Append output mode. Other output modes are not yet supported.
 
-- As of Spark 2.3, you cannot use other non-map-like operations before joins. Here are a few examples of
+- As of Spark 2.4, you cannot use other non-map-like operations before joins. Here are a few examples of
   what cannot be used.
 
   - Cannot use streaming aggregations before joins.
@@ -1493,7 +1493,7 @@ Additional details on supported joins:
 ### Streaming Deduplication
 You can deduplicate records in data streams using a unique identifier in the events. This is exactly same as deduplication on static using a unique identifier column. The query will store the necessary amount of data from previous records such that it can filter duplicate records. Similar to aggregations, you can use deduplication with or without watermarking.
 
-- *With watermark* - If there is an upper bound on how late a duplicate record may arrive, then you can define a watermark on an event time column and deduplicate using both the guid and the event time columns. The query will use the watermark to remove old state data from past records that are not expected to get any duplicates any more. This bounds the amount of the state the query has to maintain.
+- *With watermark* - If there is a upper bound on how late a duplicate record may arrive, then you can define a watermark on a event time column and deduplicate using both the guid and the event time columns. The query will use the watermark to remove old state data from past records that are not expected to get any duplicates any more. This bounds the amount of the state the query has to maintain.
 
 - *Without watermark* - Since there are no bounds on when a duplicate record may arrive, the query stores the data from all the past records as state.
 
@@ -1567,17 +1567,25 @@ be tolerated for stateful operations. You specify these thresholds using
 ``withWatermarks("eventTime", delay)`` on each of the input streams. For example, consider
 a query with stream-stream joins between `inputStream1` and `inputStream2`.
     
-  inputStream1.withWatermark("eventTime1", "1 hour")
-    .join(
-      inputStream2.withWatermark("eventTime2", "2 hours"),
-      joinCondition)
+<div class="codetabs">
+<div data-lang="scala"  markdown="1">
+
+{% highlight scala %}
+inputStream1.withWatermark("eventTime1", "1 hour")
+  .join(
+    inputStream2.withWatermark("eventTime2", "2 hours"),
+    joinCondition)
+{% endhighlight %}
+
+</div>
+</div>
 
 While executing the query, Structured Streaming individually tracks the maximum
 event time seen in each input stream, calculates watermarks based on the corresponding delay,
 and chooses a single global watermark with them to be used for stateful operations. By default,
 the minimum is chosen as the global watermark because it ensures that no data is
 accidentally dropped as too late if one of the streams falls behind the others
-(for example, one of the streams stops receiving data due to upstream failures). In other words,
+(for example, one of the streams stop receiving data due to upstream failures). In other words,
 the global watermark will safely move at the pace of the slowest stream and the query output will
 be delayed accordingly.
 
@@ -1598,7 +1606,7 @@ Some of them are as follows.
  
 - Multiple streaming aggregations (i.e. a chain of aggregations on a streaming DF) are not yet supported on streaming Datasets.
 
-- Limit and take the first N rows are not supported on streaming Datasets.
+- Limit and take first N rows are not supported on streaming Datasets.
 
 - Distinct operations on streaming Datasets are not supported.
 
@@ -1634,7 +1642,7 @@ returned through `Dataset.writeStream()`. You will have to specify one or more o
 
 - *Query name:* Optionally, specify a unique name of the query for identification.
 
-- *Trigger interval:* Optionally, specify the trigger interval. If it is not specified, the system will check for availability of new data as soon as the previous processing has been completed. If a trigger time is missed because the previous processing has not been completed, then the system will trigger processing immediately.
+- *Trigger interval:* Optionally, specify the trigger interval. If it is not specified, the system will check for availability of new data as soon as the previous processing has completed. If a trigger time is missed because the previous processing has not completed, then the system will trigger processing immediately.
 
 - *Checkpoint location:* For some output sinks where the end-to-end fault-tolerance can be guaranteed, specify the location where the system will write all the checkpoint information. This should be a directory in an HDFS-compatible fault-tolerant file system. The semantics of checkpointing is discussed in more detail in the next section.
 
@@ -1819,7 +1827,7 @@ Here are the details of all the sinks in Spark.
   <tr>
     <td><b>Kafka Sink</b></td>
     <td>Append, Update, Complete</td>
-    <td>See the <a href="structured-streaming-kafka-0-10-integration.html">Kafka Integration Guide</a></td>
+    <td>See the <a href="structured-streaming-kafka-integration.html">Kafka Integration Guide</a></td>
     <td>Yes (at-least-once)</td>
     <td>More details in the <a href="structured-streaming-kafka-integration.html">Kafka Integration Guide</a></td>
   </tr>
@@ -1827,7 +1835,7 @@ Here are the details of all the sinks in Spark.
     <td><b>Foreach Sink</b></td>
     <td>Append, Update, Complete</td>
     <td>None</td>
-    <td>Depends on ForeachWriter implementation</td>
+    <td>Yes (at-least-once)</td>
     <td>More details in the <a href="#using-foreach-and-foreachbatch">next section</a></td>
   </tr>
   <tr>
@@ -2051,7 +2059,7 @@ streamingDF.writeStream.foreachBatch { (batchDF: DataFrame, batchId: Long) =>
 
 {% highlight java %}
 streamingDatasetOfString.writeStream().foreachBatch(
-  new VoidFunction2<Dataset<String>, Long> {
+  new VoidFunction2<Dataset<String>, Long>() {
     public void call(Dataset<String> dataset, Long batchId) {
       // Transform and write batchDF
     }    
@@ -2086,12 +2094,20 @@ With `foreachBatch`, you can do the following.
   cause the output data to be recomputed (including possible re-reading of the input data). To avoid recomputations,
   you should cache the output DataFrame/Dataset, write it to multiple locations, and then uncache it. Here is an outline.  
 
-    streamingDF.writeStream.foreachBatch { (batchDF: DataFrame, batchId: Long) =>
-      batchDF.persist()
-      batchDF.write.format(...).save(...)  // location 1
-      batchDF.write.format(...).save(...)  // location 2
-      batchDF.unpersist()
-    }
+<div class="codetabs">
+<div data-lang="scala"  markdown="1">
+
+{% highlight scala %}
+streamingDF.writeStream.foreachBatch { (batchDF: DataFrame, batchId: Long) =>
+  batchDF.persist()
+  batchDF.write.format(...).save(...)  // location 1
+  batchDF.write.format(...).save(...)  // location 2
+  batchDF.unpersist()
+}
+{% endhighlight %}
+
+</div>
+</div>
 
 - **Apply additional DataFrame operations** - Many DataFrame and Dataset operations are not supported 
   in streaming DataFrames because Spark does not support generating incremental plans in those cases. 
@@ -2106,7 +2122,7 @@ With `foreachBatch`, you can do the following.
 
 ###### Foreach
 If `foreachBatch` is not an option (for example, corresponding batch data writer does not exist, or 
-continuous processing mode), then you can express your custom writer logic using `foreach`. 
+continuous processing mode), then you can express you custom writer logic using `foreach`. 
 Specifically, you can express the data writing logic by dividing it into three methods: `open`, `process`, and `close`.
 Since Spark 2.4, `foreach` is available in Scala, Java and Python. 
 
@@ -2140,7 +2156,7 @@ streamingDatasetOfString.writeStream.foreach(
 In Java, you have to extend the class `ForeachWriter` ([docs](api/java/org/apache/spark/sql/ForeachWriter.html)).
 {% highlight java %}
 streamingDatasetOfString.writeStream().foreach(
-  new ForeachWriter[String] {
+  new ForeachWriter<String>() {
 
     @Override public boolean open(long partitionId, long version) {
       // Open connection
@@ -2166,34 +2182,34 @@ The function offers a simple way to express your processing logic but does not a
 deduplicate generated data when failures cause reprocessing of some input data. 
 For that situation you must specify the processing logic in an object.
 
-1. The function takes a row as input.
+- First, the function takes a row as input.
 
-  {% highlight python %}
-      def process_row(row):
-          # Write row to storage
-          pass
-      
-      query = streamingDF.writeStream.foreach(process_row).start()  
-  {% endhighlight %}
+{% highlight python %}
+def process_row(row):
+    # Write row to storage
+    pass
 
-2. The object has a process method and optional open and close methods: 
+query = streamingDF.writeStream.foreach(process_row).start()  
+{% endhighlight %}
 
-  {% highlight python %}
-      class ForeachWriter:
-          def open(self, partition_id, epoch_id):
-              # Open connection. This method is optional in Python.
-              pass
+- Second, the object has a process method and optional open and close methods:
+
+{% highlight python %}
+class ForeachWriter:
+    def open(self, partition_id, epoch_id):
+        # Open connection. This method is optional in Python.
+        pass
+
+    def process(self, row):
+        # Write row to connection. This method is NOT optional in Python.
+        pass
+
+    def close(self, error):
+        # Close the connection. This method in optional in Python.
+        pass
       
-          def process(self, row):
-              # Write row to connection. This method is NOT optional in Python.
-              pass
-      
-          def close(self, error):
-              # Close the connection. This method in optional in Python.
-              pass
-      
-      query = streamingDF.writeStream.foreach(ForeachWriter()).start()
-  {% endhighlight %}
+query = streamingDF.writeStream.foreach(ForeachWriter()).start()
+{% endhighlight %}
 
 </div>
 <div data-lang="r"  markdown="1">
@@ -2227,17 +2243,15 @@ When the streaming query is started, Spark calls the function or the object’s 
 
 - The close() method (if it exists) is called if an open() method exists and returns successfully (irrespective of the return value), except if the JVM or Python process crashes in the middle.
 
-- **Note:** The partitionId and epochId in the open() method can be used to deduplicate generated data 
-  when failures cause reprocessing of some input data. This depends on the execution mode of the query. 
-  If the streaming query is being executed in the micro-batch mode, then every partition represented 
-  by a unique tuple (partition_id, epoch_id) is guaranteed to have the same data. 
-  Hence, (partition_id, epoch_id) can be used to deduplicate and/or transactionally commit 
-  data and achieve exactly-once guarantees. However, if the streaming query is being executed 
-  in the continuous mode, then this guarantee does not hold and therefore should not be used for deduplication.
+- **Note:** Spark does not guarantee same output for (partitionId, epochId), so deduplication
+  cannot be achieved with (partitionId, epochId). e.g. source provides different number of
+  partitions for some reasons, Spark optimization changes number of partitions, etc.
+  See [SPARK-28650](https://issues.apache.org/jira/browse/SPARK-28650) for more details.
+  If you need deduplication on output, try out `foreachBatch` instead.
 
 #### Triggers
-The trigger settings of a streaming query define the timing of streaming data processing, whether
-the query is going to be executed as micro-batch query with a fixed batch interval or as a continuous processing query.
+The trigger settings of a streaming query defines the timing of streaming data processing, whether
+the query is going to executed as micro-batch query with a fixed batch interval or as a continuous processing query.
 Here are the different kinds of triggers that are supported.
 
 <table class="table">
@@ -2283,7 +2297,7 @@ Here are the different kinds of triggers that are supported.
     <td><b>Continuous with fixed checkpoint interval</b><br/><i>(experimental)</i></td>
     <td>
         The query will be executed in the new low-latency, continuous processing mode. Read more
-        about this in the <a href="#continuous-processing-experimental">Continuous Processing section</a> below.
+        about this in the <a href="#continuous-processing">Continuous Processing section</a> below.
     </td>
   </tr>
 </table>
@@ -2539,11 +2553,11 @@ spark.streams().awaitAnyTermination();   // block until any one of them terminat
 {% highlight python %}
 spark = ...  # spark session
 
-spark.streams().active  # get the list of currently active streaming queries
+spark.streams.active  # get the list of currently active streaming queries
 
-spark.streams().get(id)  # get a query object by its unique id
+spark.streams.get(id)  # get a query object by its unique id
 
-spark.streams().awaitAnyTermination()  # block until any one of them terminates
+spark.streams.awaitAnyTermination()  # block until any one of them terminates
 {% endhighlight %}
 
 </div>
@@ -2960,7 +2974,7 @@ the effect of the change is not well-defined. For all of them:
 
   - Addition/deletion/modification of rate limits is allowed: `spark.readStream.format("kafka").option("subscribe", "topic")` to `spark.readStream.format("kafka").option("subscribe", "topic").option("maxOffsetsPerTrigger", ...)`
 
-  - Changes to subscribed topics/files are generally not allowed as the results are unpredictable: `spark.readStream.format("kafka").option("subscribe", "topic")` to `spark.readStream.format("kafka").option("subscribe", "newTopic")`
+  - Changes to subscribed topics/files is generally not allowed as the results are unpredictable: `spark.readStream.format("kafka").option("subscribe", "topic")` to `spark.readStream.format("kafka").option("subscribe", "newTopic")`
 
 - *Changes in the type of output sink*: Changes between a few specific combinations of sinks 
   are allowed. This needs to be verified on a case-by-case basis. Here are a few examples.
@@ -2974,17 +2988,17 @@ the effect of the change is not well-defined. For all of them:
 - *Changes in the parameters of output sink*: Whether this is allowed and whether the semantics of 
   the change are well-defined depends on the sink and the query. Here are a few examples.
 
-  - Changes to output directory of a file sink are not allowed: `sdf.writeStream.format("parquet").option("path", "/somePath")` to `sdf.writeStream.format("parquet").option("path", "/anotherPath")`
+  - Changes to output directory of a file sink is not allowed: `sdf.writeStream.format("parquet").option("path", "/somePath")` to `sdf.writeStream.format("parquet").option("path", "/anotherPath")`
 
-  - Changes to output topic are allowed: `sdf.writeStream.format("kafka").option("topic", "someTopic")` to `sdf.writeStream.format("kafka").option("topic", "anotherTopic")`
+  - Changes to output topic is allowed: `sdf.writeStream.format("kafka").option("topic", "someTopic")` to `sdf.writeStream.format("kafka").option("topic", "anotherTopic")`
 
-  - Changes to the user-defined foreach sink (that is, the `ForeachWriter` code) are allowed, but the semantics of the change depends on the code.
+  - Changes to the user-defined foreach sink (that is, the `ForeachWriter` code) is allowed, but the semantics of the change depends on the code.
 
 - *Changes in projection / filter / map-like operations**: Some cases are allowed. For example:
 
   - Addition / deletion of filters is allowed: `sdf.selectExpr("a")` to `sdf.where(...).selectExpr("a").filter(...)`.
 
-  - Changes in projections with same output schema are allowed: `sdf.selectExpr("stringColumn AS json").writeStream` to `sdf.selectExpr("anotherStringColumn AS json").writeStream`
+  - Changes in projections with same output schema is allowed: `sdf.selectExpr("stringColumn AS json").writeStream` to `sdf.selectExpr("anotherStringColumn AS json").writeStream`
 
   - Changes in projections with different output schema are conditionally allowed: `sdf.selectExpr("a").writeStream` to `sdf.selectExpr("b").writeStream` is allowed only if the output sink allows the schema change from `"a"` to `"b"`.
 
@@ -3000,7 +3014,7 @@ the effect of the change is not well-defined. For all of them:
   - *Streaming deduplication*: For example, `sdf.dropDuplicates("a")`. Any change in number or type of grouping keys or aggregates is not allowed.
 
   - *Stream-stream join*: For example, `sdf1.join(sdf2, ...)` (i.e. both inputs are generated with `sparkSession.readStream`). Changes
-    in the schema or equi-joining columns are not allowed. Changes in join type (outer or inner) are not allowed. Other changes in the join condition are ill-defined.
+    in the schema or equi-joining columns are not allowed. Changes in join type (outer or inner) not allowed. Other changes in the join condition are ill-defined.
 
   - *Arbitrary stateful operation*: For example, `sdf.groupByKey(...).mapGroupsWithState(...)` or `sdf.groupByKey(...).flatMapGroupsWithState(...)`.
     Any change to the schema of the user-defined state and the type of timeout is not allowed.
@@ -3022,12 +3036,6 @@ To run a supported query in continuous processing mode, all you need to do is sp
 <div data-lang="scala"  markdown="1">
 {% highlight scala %}
 import org.apache.spark.sql.streaming.Trigger
-
-spark
-  .readStream
-  .format("rate")
-  .option("rowsPerSecond", "10")
-  .option("")
 
 spark
   .readStream
@@ -3083,12 +3091,12 @@ spark \
 </div>
 </div>
 
-A checkpoint interval of 1 second means that the continuous processing engine will record the progress of the query every second. The resulting checkpoints are in a format compatible with the micro-batch engine, hence any query can be restarted with any trigger. For example, a supported query started with the micro-batch mode can be restarted in continuous mode, and vice versa. Note that any time you switch to continuous mode, you will get at-least-once fault-tolerance guarantees.
+A checkpoint interval of 1 second means that the continuous processing engine will records the progress of the query every second. The resulting checkpoints are in a format compatible with the micro-batch engine, hence any query can be restarted with any trigger. For example, a supported query started with the micro-batch mode can be restarted in continuous mode, and vice versa. Note that any time you switch to continuous mode, you will get at-least-once fault-tolerance guarantees.
 
 ## Supported Queries
 {:.no_toc}
 
-As of Spark 2.3, only the following type of queries are supported in the continuous processing mode.
+As of Spark 2.4, only the following type of queries are supported in the continuous processing mode.
 
 - *Operations*: Only map-like Dataset/DataFrame operations are supported in continuous mode, that is, only projections (`select`, `map`, `flatMap`, `mapPartitions`, etc.) and selections (`where`, `filter`, etc.).
   + All SQL functions are supported except aggregation functions (since aggregations are not yet supported), `current_timestamp()` and `current_date()` (deterministic computations using time is challenging).
@@ -3112,16 +3120,6 @@ See [Input Sources](#input-sources) and [Output Sinks](#output-sinks) sections f
 - There are currently no automatic retries of failed tasks. Any failure will lead to the query being stopped and it needs to be manually restarted from the checkpoint.
 
 # Additional Information
-
-**Notes**
-
-- Several configurations are not modifiable after the query has run. To change them, discard the checkpoint and start a new query. These configurations include:
-  - `spark.sql.shuffle.partitions`
-    - This is due to the physical partitioning of state: state is partitioned via applying hash function to key, hence the number of partitions for state should be unchanged.
-    - If you want to run fewer tasks for stateful operations, `coalesce` would help with avoiding unnecessary repartitioning.
-      - After `coalesce`, the number of (reduced) tasks will be kept unless another shuffle happens.
-  - `spark.sql.streaming.stateStore.providerClass`: To read the previous state of the query properly, the class of state store provider should be unchanged.
-  - `spark.sql.streaming.multipleWatermarkPolicy`: Modification of this would lead inconsistent watermark value when query contains multiple watermarks, hence the policy should be unchanged.
 
 **Further Reading**
 

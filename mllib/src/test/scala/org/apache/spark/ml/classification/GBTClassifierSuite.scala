@@ -178,7 +178,8 @@ class GBTClassifierSuite extends MLTest with DefaultReadWriteTest {
         assert(raw.size === 2)
         // check that raw prediction is tree predictions dot tree weights
         val treePredictions = gbtModel.trees.map(_.rootNode.predictImpl(features).prediction)
-        val prediction = blas.ddot(gbtModel.numTrees, treePredictions, 1, gbtModel.treeWeights, 1)
+        val prediction = blas.ddot(gbtModel.getNumTrees, treePredictions, 1,
+          gbtModel.treeWeights, 1)
         assert(raw ~== Vectors.dense(-prediction, prediction) relTol eps)
 
         // Compare rawPrediction with probability
@@ -363,8 +364,7 @@ class GBTClassifierSuite extends MLTest with DefaultReadWriteTest {
     val gbtWithFeatureSubset = gbt.setFeatureSubsetStrategy("1")
     val importanceFeatures = gbtWithFeatureSubset.fit(df).featureImportances
     val mostIF = importanceFeatures.argmax
-    assert(mostIF === 1)
-    assert(importances(mostImportantFeature) !== importanceFeatures(mostIF))
+    assert(mostImportantFeature !== mostIF)
   }
 
   test("model evaluateEachIteration") {
@@ -411,9 +411,9 @@ class GBTClassifierSuite extends MLTest with DefaultReadWriteTest {
       gbt.setValidationIndicatorCol(validationIndicatorCol)
       val modelWithValidation = gbt.fit(trainDF.union(validationDF))
 
-      assert(modelWithoutValidation.numTrees === numIter)
+      assert(modelWithoutValidation.getNumTrees === numIter)
       // early stop
-      assert(modelWithValidation.numTrees < numIter)
+      assert(modelWithValidation.getNumTrees < numIter)
 
       val (errorWithoutValidation, errorWithValidation) = {
         val remappedRdd = validationData.map(x => new LabeledPoint(2 * x.label - 1, x.features))
@@ -429,10 +429,10 @@ class GBTClassifierSuite extends MLTest with DefaultReadWriteTest {
           modelWithoutValidation.treeWeights, modelWithoutValidation.getOldLossType,
           OldAlgo.Classification)
       assert(evaluationArray.length === numIter)
-      assert(evaluationArray(modelWithValidation.numTrees) >
-        evaluationArray(modelWithValidation.numTrees - 1))
+      assert(evaluationArray(modelWithValidation.getNumTrees) >
+        evaluationArray(modelWithValidation.getNumTrees - 1))
       var i = 1
-      while (i < modelWithValidation.numTrees) {
+      while (i < modelWithValidation.getNumTrees) {
         assert(evaluationArray(i) <= evaluationArray(i - 1))
         i += 1
       }
@@ -449,7 +449,6 @@ class GBTClassifierSuite extends MLTest with DefaultReadWriteTest {
         model2: GBTClassificationModel): Unit = {
       TreeTests.checkEqual(model, model2)
       assert(model.numFeatures === model2.numFeatures)
-      assert(model.featureImportances == model2.featureImportances)
     }
 
     val gbt = new GBTClassifier()

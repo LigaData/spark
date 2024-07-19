@@ -429,7 +429,7 @@ class InMemoryColumnarQuerySuite extends QueryTest with SharedSQLContext {
       val df2 = Seq(("a", 1), ("b", 2), ("c", 3)).toDF("item", "id")
       val df3 = df1.join(df2, Seq("item")).select($"id", $"group".as("item")).distinct()
 
-      df3.unpersist(blocking = true)
+      df3.unpersist()
       val agg_without_cache = df3.groupBy($"item").count()
 
       df3.cache()
@@ -445,7 +445,7 @@ class InMemoryColumnarQuerySuite extends QueryTest with SharedSQLContext {
     // with a non-empty list
     assert(df.filter($"id".isin(2)).count() == 1)
     assert(df.filter($"id".isin(2, 3)).count() == 2)
-    df.unpersist(blocking = true)
+    df.unpersist()
     val dfNulls = spark.range(10).selectExpr("null as id").cache()
     // with null as value for the attribute
     assert(dfNulls.filter($"id".isin()).count() == 0)
@@ -463,26 +463,29 @@ class InMemoryColumnarQuerySuite extends QueryTest with SharedSQLContext {
     assert(tableScanExec.partitionFilters.isEmpty)
   }
 
-  testWithWholeStageCodegenOnAndOff("SPARK-22348: table cache " +
-    "should do partition batch pruning") { codegenEnabled =>
-    val df1 = Seq((1, 1), (1, 1), (2, 2)).toDF("x", "y")
-    df1.unpersist(blocking = true)
-    df1.cache()
+  test("SPARK-22348: table cache should do partition batch pruning") {
+    Seq("true", "false").foreach { enabled =>
+      withSQLConf(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key -> enabled) {
+        val df1 = Seq((1, 1), (1, 1), (2, 2)).toDF("x", "y")
+        df1.unpersist()
+        df1.cache()
 
-    // Push predicate to the cached table.
-    val df2 = df1.where("y = 3")
+        // Push predicate to the cached table.
+        val df2 = df1.where("y = 3")
 
-    val planBeforeFilter = df2.queryExecution.executedPlan.collect {
-      case f: FilterExec => f.child
+        val planBeforeFilter = df2.queryExecution.executedPlan.collect {
+          case f: FilterExec => f.child
+        }
+        assert(planBeforeFilter.head.isInstanceOf[InMemoryTableScanExec])
+
+        val execPlan = if (enabled == "true") {
+          WholeStageCodegenExec(planBeforeFilter.head)(codegenStageId = 0)
+        } else {
+          planBeforeFilter.head
+        }
+        assert(execPlan.executeCollectPublic().length == 0)
+      }
     }
-    assert(planBeforeFilter.head.isInstanceOf[InMemoryTableScanExec])
-
-    val execPlan = if (codegenEnabled == "true") {
-      WholeStageCodegenExec(planBeforeFilter.head)(codegenStageId = 0)
-    } else {
-      planBeforeFilter.head
-    }
-    assert(execPlan.executeCollectPublic().length == 0)
   }
 
   test("SPARK-25727 - otherCopyArgs in InMemoryRelation does not include outputOrdering") {

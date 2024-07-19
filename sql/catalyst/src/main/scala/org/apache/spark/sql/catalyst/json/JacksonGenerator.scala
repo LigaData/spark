@@ -23,7 +23,8 @@ import com.fasterxml.jackson.core._
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.SpecializedGetters
-import org.apache.spark.sql.catalyst.util._
+import org.apache.spark.sql.catalyst.util.{ArrayData, DateTimeUtils, MapData}
+import org.apache.spark.sql.catalyst.util.DateTimeUtils.TimestampParser
 import org.apache.spark.sql.types._
 
 /**
@@ -70,18 +71,11 @@ private[sql] class JacksonGenerator(
       s"Initial type ${dataType.catalogString} must be a ${MapType.simpleString}")
   }
 
-  private val gen = {
-    val generator = new JsonFactory().createGenerator(writer).setRootValueSeparator(null)
-    if (options.pretty) generator.useDefaultPrettyPrinter() else generator
-  }
+  private val gen = new JsonFactory().createGenerator(writer).setRootValueSeparator(null)
 
   private val lineSeparator: String = options.lineSeparatorInWrite
 
-  private val timestampFormatter = TimestampFormatter(
-    options.timestampFormat,
-    options.timeZone,
-    options.locale)
-  private val dateFormatter = DateFormatter(options.dateFormat, options.locale)
+  @transient private lazy val timestampParser = new TimestampParser(options.timestampFormat)
 
   private def makeWriter(dataType: DataType): ValueWriter = dataType match {
     case NullType =>
@@ -122,12 +116,13 @@ private[sql] class JacksonGenerator(
 
     case TimestampType =>
       (row: SpecializedGetters, ordinal: Int) =>
-        val timestampString = timestampFormatter.format(row.getLong(ordinal))
+        val timestampString = timestampParser.format(row.getLong(ordinal))
         gen.writeString(timestampString)
 
     case DateType =>
       (row: SpecializedGetters, ordinal: Int) =>
-        val dateString = dateFormatter.format(row.getInt(ordinal))
+        val dateString =
+          options.dateFormat.format(DateTimeUtils.toJavaDate(row.getInt(ordinal)))
         gen.writeString(dateString)
 
     case BinaryType =>

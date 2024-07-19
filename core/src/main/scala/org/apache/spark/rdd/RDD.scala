@@ -36,16 +36,13 @@ import org.apache.spark.Partitioner._
 import org.apache.spark.annotation.{DeveloperApi, Experimental, Since}
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config._
-import org.apache.spark.internal.config.RDD_LIMIT_SCALE_UP_FACTOR
 import org.apache.spark.partial.BoundedDouble
 import org.apache.spark.partial.CountEvaluator
 import org.apache.spark.partial.GroupedCountEvaluator
 import org.apache.spark.partial.PartialResult
 import org.apache.spark.storage.{RDDBlockId, StorageLevel}
 import org.apache.spark.util.{BoundedPriorityQueue, Utils}
-import org.apache.spark.util.collection.{ExternalAppendOnlyMap, OpenHashMap,
-  Utils => collectionUtils}
+import org.apache.spark.util.collection.{OpenHashMap, Utils => collectionUtils}
 import org.apache.spark.util.random.{BernoulliCellSampler, BernoulliSampler, PoissonSampler,
   SamplingUtils}
 
@@ -212,11 +209,11 @@ abstract class RDD[T: ClassTag](
   /**
    * Mark the RDD as non-persistent, and remove all blocks for it from memory and disk.
    *
-   * @param blocking Whether to block until all blocks are deleted (default: false)
+   * @param blocking Whether to block until all blocks are deleted.
    * @return This RDD.
    */
-  def unpersist(blocking: Boolean = false): this.type = {
-    logInfo(s"Removing RDD $id from persistence list")
+  def unpersist(blocking: Boolean = true): this.type = {
+    logInfo("Removing RDD " + id + " from persistence list")
     sc.unpersistRDD(id, blocking)
     storageLevel = StorageLevel.NONE
     this
@@ -225,10 +222,24 @@ abstract class RDD[T: ClassTag](
   /** Get the RDD's current storage level, or StorageLevel.NONE if none is set. */
   def getStorageLevel: StorageLevel = storageLevel
 
+  /**
+   * Lock for all mutable state of this RDD (persistence, partitions, dependencies, etc.).  We do
+   * not use `this` because RDDs are user-visible, so users might have added their own locking on
+   * RDDs; sharing that could lead to a deadlock.
+   *
+   * One thread might hold the lock on many of these, for a chain of RDD dependencies; but
+   * because DAGs are acyclic, and we only ever hold locks for one path in that DAG, there is no
+   * chance of deadlock.
+   *
+   * The use of Integer is simply so this is serializable -- executors may reference the shared
+   * fields (though they should never mutate them, that only happens on the driver).
+   */
+  private val stateLock = new Integer(0)
+
   // Our dependencies and partitions will be gotten by calling subclass's methods below, and will
   // be overwritten when we're checkpointed
-  private var dependencies_ : Seq[Dependency[_]] = _
-  @transient private var partitions_ : Array[Partition] = _
+  @volatile private var dependencies_ : Seq[Dependency[_]] = _
+  @volatile @transient private var partitions_ : Array[Partition] = _
 
   /** An Option holding our checkpoint RDD, if we are checkpointed */
   private def checkpointRDD: Option[CheckpointRDD[T]] = checkpointData.flatMap(_.checkpointRDD)
@@ -240,7 +251,11 @@ abstract class RDD[T: ClassTag](
   final def dependencies: Seq[Dependency[_]] = {
     checkpointRDD.map(r => List(new OneToOneDependency(r))).getOrElse {
       if (dependencies_ == null) {
-        dependencies_ = getDependencies
+        stateLock.synchronized {
+          if (dependencies_ == null) {
+            dependencies_ = getDependencies
+          }
+        }
       }
       dependencies_
     }
@@ -253,10 +268,14 @@ abstract class RDD[T: ClassTag](
   final def partitions: Array[Partition] = {
     checkpointRDD.map(_.partitions).getOrElse {
       if (partitions_ == null) {
-        partitions_ = getPartitions
-        partitions_.zipWithIndex.foreach { case (partition, index) =>
-          require(partition.index == index,
-            s"partitions($index).partition == ${partition.index}, but it should equal $index")
+        stateLock.synchronized {
+          if (partitions_ == null) {
+            partitions_ = getPartitions
+            partitions_.zipWithIndex.foreach { case (partition, index) =>
+              require(partition.index == index,
+                s"partitions($index).partition == ${partition.index}, but it should equal $index")
+            }
+          }
         }
       }
       partitions_
@@ -399,20 +418,7 @@ abstract class RDD[T: ClassTag](
    * Return a new RDD containing the distinct elements in this RDD.
    */
   def distinct(numPartitions: Int)(implicit ord: Ordering[T] = null): RDD[T] = withScope {
-    def removeDuplicatesInPartition(partition: Iterator[T]): Iterator[T] = {
-      // Create an instance of external append only map which ignores values.
-      val map = new ExternalAppendOnlyMap[T, Null, Null](
-        createCombiner = value => null,
-        mergeValue = (a, b) => a,
-        mergeCombiners = (a, b) => a)
-      map.insertAll(partition.map(_ -> null))
-      map.iterator.map(_._1)
-    }
-    partitioner match {
-      case Some(p) if numPartitions == partitions.length =>
-        mapPartitions(removeDuplicatesInPartition, preservesPartitioning = true)
-      case _ => map(x => (x, null)).reduceByKey((x, y) => x, numPartitions).map(_._1)
-    }
+    map(x => (x, null)).reduceByKey((x, y) => x, numPartitions).map(_._1)
   }
 
   /**
@@ -557,7 +563,7 @@ abstract class RDD[T: ClassTag](
       val sampler = new BernoulliCellSampler[T](lb, ub)
       sampler.setSeed(seed + index)
       sampler.sample(partition)
-    }, preservesPartitioning = true)
+    }, isOrderSensitive = true, preservesPartitioning = true)
   }
 
   /**
@@ -868,6 +874,29 @@ abstract class RDD[T: ClassTag](
       this,
       (context: TaskContext, index: Int, iter: Iterator[T]) => cleanedF(index, iter),
       preservesPartitioning)
+  }
+
+  /**
+   * Return a new RDD by applying a function to each partition of this RDD, while tracking the index
+   * of the original partition.
+   *
+   * `preservesPartitioning` indicates whether the input function preserves the partitioner, which
+   * should be `false` unless this is a pair RDD and the input function doesn't modify the keys.
+   *
+   * `isOrderSensitive` indicates whether the function is order-sensitive. If it is order
+   * sensitive, it may return totally different result when the input order
+   * is changed. Mostly stateful functions are order-sensitive.
+   */
+  private[spark] def mapPartitionsWithIndex[U: ClassTag](
+      f: (Int, Iterator[T]) => Iterator[U],
+      preservesPartitioning: Boolean,
+      isOrderSensitive: Boolean): RDD[U] = withScope {
+    val cleanedF = sc.clean(f)
+    new MapPartitionsRDD(
+      this,
+      (_: TaskContext, index: Int, iter: Iterator[T]) => cleanedF(index, iter),
+      preservesPartitioning,
+      isOrderSensitive = isOrderSensitive)
   }
 
   /**
@@ -1260,7 +1289,7 @@ abstract class RDD[T: ClassTag](
    *
    * The algorithm used is based on streamlib's implementation of "HyperLogLog in Practice:
    * Algorithmic Engineering of a State of The Art Cardinality Estimation Algorithm", available
-   * <a href="https://doi.org/10.1145/2452376.2452456">here</a>.
+   * <a href="http://dx.doi.org/10.1145/2452376.2452456">here</a>.
    *
    * The relative accuracy is approximately `1.054 / sqrt(2^p)`. Setting a nonzero (`sp` is greater
    * than `p`) would trigger sparse representation of registers, which may reduce the memory
@@ -1292,7 +1321,7 @@ abstract class RDD[T: ClassTag](
    *
    * The algorithm used is based on streamlib's implementation of "HyperLogLog in Practice:
    * Algorithmic Engineering of a State of The Art Cardinality Estimation Algorithm", available
-   * <a href="https://doi.org/10.1145/2452376.2452456">here</a>.
+   * <a href="http://dx.doi.org/10.1145/2452376.2452456">here</a>.
    *
    * @param relativeSD Relative accuracy. Smaller values create counters that require more space.
    *                   It must be greater than 0.000017.
@@ -1351,7 +1380,7 @@ abstract class RDD[T: ClassTag](
    * an exception if called on an RDD of `Nothing` or `Null`.
    */
   def take(num: Int): Array[T] = withScope {
-    val scaleUpFactor = Math.max(conf.get(RDD_LIMIT_SCALE_UP_FACTOR), 2)
+    val scaleUpFactor = Math.max(conf.getInt("spark.rdd.limit.scaleUpFactor", 4), 2)
     if (num == 0) {
       new Array[T](0)
     } else {
@@ -1492,21 +1521,45 @@ abstract class RDD[T: ClassTag](
    * Save this RDD as a text file, using string representations of elements.
    */
   def saveAsTextFile(path: String): Unit = withScope {
-    saveAsTextFile(path, null)
+    // https://issues.apache.org/jira/browse/SPARK-2075
+    //
+    // NullWritable is a `Comparable` in Hadoop 1.+, so the compiler cannot find an implicit
+    // Ordering for it and will use the default `null`. However, it's a `Comparable[NullWritable]`
+    // in Hadoop 2.+, so the compiler will call the implicit `Ordering.ordered` method to create an
+    // Ordering for `NullWritable`. That's why the compiler will generate different anonymous
+    // classes for `saveAsTextFile` in Hadoop 1.+ and Hadoop 2.+.
+    //
+    // Therefore, here we provide an explicit Ordering `null` to make sure the compiler generate
+    // same bytecodes for `saveAsTextFile`.
+    val nullWritableClassTag = implicitly[ClassTag[NullWritable]]
+    val textClassTag = implicitly[ClassTag[Text]]
+    val r = this.mapPartitions { iter =>
+      val text = new Text()
+      iter.map { x =>
+        text.set(x.toString)
+        (NullWritable.get(), text)
+      }
+    }
+    RDD.rddToPairRDDFunctions(r)(nullWritableClassTag, textClassTag, null)
+      .saveAsHadoopFile[TextOutputFormat[NullWritable, Text]](path)
   }
 
   /**
    * Save this RDD as a compressed text file, using string representations of elements.
    */
   def saveAsTextFile(path: String, codec: Class[_ <: CompressionCodec]): Unit = withScope {
-    this.mapPartitions { iter =>
+    // https://issues.apache.org/jira/browse/SPARK-2075
+    val nullWritableClassTag = implicitly[ClassTag[NullWritable]]
+    val textClassTag = implicitly[ClassTag[Text]]
+    val r = this.mapPartitions { iter =>
       val text = new Text()
       iter.map { x =>
-        require(x != null, "text files do not allow null rows")
         text.set(x.toString)
         (NullWritable.get(), text)
       }
-    }.saveAsHadoopFile[TextOutputFormat[NullWritable, Text]](path, codec)
+    }
+    RDD.rddToPairRDDFunctions(r)(nullWritableClassTag, textClassTag, null)
+      .saveAsHadoopFile[TextOutputFormat[NullWritable, Text]](path, codec)
   }
 
   /**
@@ -1568,8 +1621,8 @@ abstract class RDD[T: ClassTag](
    * The checkpoint directory set through `SparkContext#setCheckpointDir` is not used.
    */
   def localCheckpoint(): this.type = RDDCheckpointData.synchronized {
-    if (conf.get(DYN_ALLOCATION_ENABLED) &&
-        conf.contains(DYN_ALLOCATION_CACHED_EXECUTOR_IDLE_TIMEOUT)) {
+    if (conf.getBoolean("spark.dynamicAllocation.enabled", false) &&
+        conf.contains("spark.dynamicAllocation.cachedExecutorIdleTimeout")) {
       logWarning("Local checkpointing is NOT safe to use with dynamic allocation, " +
         "which removes executors along with their cached blocks. If you must use both " +
         "features, you are advised to set `spark.dynamicAllocation.cachedExecutorIdleTimeout` " +
@@ -1767,7 +1820,7 @@ abstract class RDD[T: ClassTag](
    * Changes the dependencies of this RDD from its original parents to a new RDD (`newRDD`)
    * created from the checkpoint file, and forget its old dependencies and partitions.
    */
-  private[spark] def markCheckpointed(): Unit = {
+  private[spark] def markCheckpointed(): Unit = stateLock.synchronized {
     clearDependencies()
     partitions_ = null
     deps = null    // Forget the constructor argument for dependencies too
@@ -1779,7 +1832,7 @@ abstract class RDD[T: ClassTag](
    * collected. Subclasses of RDD may override this method for implementing their own cleaning
    * logic. See [[org.apache.spark.rdd.UnionRDD]] for an example.
    */
-  protected def clearDependencies(): Unit = {
+  protected def clearDependencies(): Unit = stateLock.synchronized {
     dependencies_ = null
   }
 
@@ -1938,6 +1991,7 @@ abstract class RDD[T: ClassTag](
       deterministicLevelCandidates.maxBy(_.id)
     }
   }
+
 }
 
 

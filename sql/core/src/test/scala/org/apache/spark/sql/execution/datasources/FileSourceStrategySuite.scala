@@ -279,7 +279,7 @@ class FileSourceStrategySuite extends QueryTest with SharedSQLContext with Predi
   }
 
   test("Locality support for FileScanRDD") {
-    val partition = FilePartition(0, Seq(
+    val partition = FilePartition(0, Array(
       PartitionedFile(InternalRow.empty, "fakePath0", 0, 10, Array("host0", "host1")),
       PartitionedFile(InternalRow.empty, "fakePath0", 10, 20, Array("host1", "host2")),
       PartitionedFile(InternalRow.empty, "fakePath1", 0, 5, Array("host3")),
@@ -614,7 +614,7 @@ class TestFileFormat extends TextBasedFileFormat {
       job: Job,
       options: Map[String, String],
       dataSchema: StructType): OutputWriterFactory = {
-    throw new UnsupportedOperationException("JUST FOR TESTING")
+    throw new NotImplementedError("JUST FOR TESTING")
   }
 
   override def buildReader(

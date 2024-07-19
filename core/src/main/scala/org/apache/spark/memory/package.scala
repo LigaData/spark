@@ -41,30 +41,38 @@ package org.apache.spark
  * Diagrammatically:
  *
  * {{{
- *       +-------------+
- *       | MemConsumer |----+                                   +------------------------+
- *       +-------------+    |    +-------------------+          |     MemoryManager      |
- *                          +--->| TaskMemoryManager |----+     |                        |
- *       +-------------+    |    +-------------------+    |     |  +------------------+  |
- *       | MemConsumer |----+                             |     |  |  StorageMemPool  |  |
- *       +-------------+         +-------------------+    |     |  +------------------+  |
- *                               | TaskMemoryManager |----+     |                        |
- *                               +-------------------+    |     |  +------------------+  |
- *                                                        +---->|  |OnHeapExecMemPool |  |
- *                                        *               |     |  +------------------+  |
- *                                        *               |     |                        |
- *       +-------------+                  *               |     |  +------------------+  |
- *       | MemConsumer |----+                             |     |  |OffHeapExecMemPool|  |
- *       +-------------+    |    +-------------------+    |     |  +------------------+  |
- *                          +--->| TaskMemoryManager |----+     |                        |
- *                               +-------------------+          +------------------------+
+ *                                                              +---------------------------+
+ *       +-------------+                                        |       MemoryManager       |
+ *       | MemConsumer |----+                                   |                           |
+ *       +-------------+    |    +-------------------+          |  +---------------------+  |
+ *                          +--->| TaskMemoryManager |----+     |  |OnHeapStorageMemPool |  |
+ *       +-------------+    |    +-------------------+    |     |  +---------------------+  |
+ *       | MemConsumer |----+                             |     |                           |
+ *       +-------------+         +-------------------+    |     |  +---------------------+  |
+ *                               | TaskMemoryManager |----+     |  |OffHeapStorageMemPool|  |
+ *                               +-------------------+    |     |  +---------------------+  |
+ *                                                        +---->|                           |
+ *                                        *               |     |  +---------------------+  |
+ *                                        *               |     |  |OnHeapExecMemPool    |  |
+ *       +-------------+                  *               |     |  +---------------------+  |
+ *       | MemConsumer |----+                             |     |                           |
+ *       +-------------+    |    +-------------------+    |     |  +---------------------+  |
+ *                          +--->| TaskMemoryManager |----+     |  |OffHeapExecMemPool   |  |
+ *                               +-------------------+          |  +---------------------+  |
+ *                                                              |                           |
+ *                                                              +---------------------------+
  * }}}
  *
  *
- * There is one implementation of [[org.apache.spark.memory.MemoryManager]]:
+ * There are two implementations of [[org.apache.spark.memory.MemoryManager]] which vary in how
+ * they handle the sizing of their memory pools:
  *
- *  - [[org.apache.spark.memory.UnifiedMemoryManager]] enforces soft
+ *  - [[org.apache.spark.memory.UnifiedMemoryManager]], the default in Spark 1.6+, enforces soft
  *    boundaries between storage and execution memory, allowing requests for memory in one region
  *    to be fulfilled by borrowing memory from the other.
+ *  - [[org.apache.spark.memory.StaticMemoryManager]] enforces hard boundaries between storage
+ *    and execution memory by statically partitioning Spark's memory and preventing storage and
+ *    execution from borrowing memory from each other. This mode is retained only for legacy
+ *    compatibility purposes.
  */
 package object memory

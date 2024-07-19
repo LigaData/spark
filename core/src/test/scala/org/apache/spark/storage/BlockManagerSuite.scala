@@ -27,8 +27,8 @@ import scala.language.{implicitConversions, postfixOps}
 import scala.reflect.ClassTag
 
 import org.apache.commons.lang3.RandomUtils
-import org.mockito.{ArgumentMatchers => mc}
-import org.mockito.Mockito.{mock, times, verify, when}
+import org.mockito.{ArgumentCaptor, Matchers => mc}
+import org.mockito.Mockito.{mock, never, spy, times, verify, when}
 import org.scalatest._
 import org.scalatest.concurrent.{Signaler, ThreadSignaler, TimeLimits}
 import org.scalatest.concurrent.Eventually._
@@ -37,7 +37,6 @@ import org.apache.spark._
 import org.apache.spark.broadcast.BroadcastManager
 import org.apache.spark.executor.DataReadMethod
 import org.apache.spark.internal.config._
-import org.apache.spark.internal.config.Tests._
 import org.apache.spark.memory.UnifiedMemoryManager
 import org.apache.spark.network.{BlockDataManager, BlockTransferService, TransportContext}
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
@@ -80,16 +79,6 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
   implicit def StringToBlockId(value: String): BlockId = new TestBlockId(value)
   def rdd(rddId: Int, splitId: Int): RDDBlockId = RDDBlockId(rddId, splitId)
 
-  private def init(sparkConf: SparkConf): Unit = {
-    sparkConf
-      .set("spark.app.id", "test")
-      .set(IS_TESTING, true)
-      .set(MEMORY_FRACTION, 1.0)
-      .set(MEMORY_STORAGE_FRACTION, 0.999)
-      .set("spark.kryoserializer.buffer", "1m")
-      .set(STORAGE_UNROLL_MEMORY_THRESHOLD, 512L)
-  }
-
   private def makeBlockManager(
       maxMem: Long,
       name: String = SparkContext.DRIVER_IDENTIFIER,
@@ -97,8 +86,8 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
       transferService: Option[BlockTransferService] = Option.empty,
       testConf: Option[SparkConf] = None): BlockManager = {
     val bmConf = testConf.map(_.setAll(conf.getAll)).getOrElse(conf)
-    bmConf.set(TEST_MEMORY, maxMem)
-    bmConf.set(MEMORY_OFFHEAP_SIZE, maxMem)
+    bmConf.set("spark.testing.memory", maxMem.toString)
+    bmConf.set(MEMORY_OFFHEAP_SIZE.key, maxMem.toString)
     val serializer = new KryoSerializer(bmConf)
     val encryptionKey = if (bmConf.get(IO_ENCRYPTION_ENABLED)) {
       Some(CryptoStreamUtils.createKey(bmConf))
@@ -123,18 +112,25 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     // Set the arch to 64-bit and compressedOops to true to get a deterministic test-case
     System.setProperty("os.arch", "amd64")
     conf = new SparkConf(false)
-    init(conf)
+      .set("spark.app.id", "test")
+      .set("spark.testing", "true")
+      .set("spark.memory.fraction", "1")
+      .set("spark.memory.storageFraction", "1")
+      .set("spark.kryoserializer.buffer", "1m")
+      .set("spark.test.useCompressedOops", "true")
+      .set("spark.storage.unrollFraction", "0.4")
+      .set("spark.storage.unrollMemoryThreshold", "512")
 
     rpcEnv = RpcEnv.create("test", "localhost", 0, conf, securityMgr)
-    conf.set(DRIVER_PORT, rpcEnv.address.port)
+    conf.set("spark.driver.port", rpcEnv.address.port.toString)
 
     // Mock SparkContext to reduce the memory usage of tests. It's fine since the only reason we
     // need to create a SparkContext is to initialize LiveListenerBus.
     sc = mock(classOf[SparkContext])
     when(sc.conf).thenReturn(conf)
-    master = new BlockManagerMaster(rpcEnv.setupEndpoint("blockmanager",
+    master = spy(new BlockManagerMaster(rpcEnv.setupEndpoint("blockmanager",
       new BlockManagerMasterEndpoint(rpcEnv, true, conf,
-        new LiveListenerBus(conf))), conf, true)
+        new LiveListenerBus(conf))), conf, true))
 
     val initialize = PrivateMethod[Unit]('initialize)
     SizeEstimator invokePrivate initialize()
@@ -195,8 +191,9 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     assert(id2_.eq(id1), "Deserialized id2 is not the same object as original id1")
   }
 
-  test("BlockManagerId.isDriver() with DRIVER_IDENTIFIER (SPARK-27090)") {
+  test("BlockManagerId.isDriver() backwards-compatibility with legacy driver ids (SPARK-6716)") {
     assert(BlockManagerId(SparkContext.DRIVER_IDENTIFIER, "XXX", 1).isDriver)
+    assert(BlockManagerId(SparkContext.LEGACY_DRIVER_IDENTIFIER, "XXX", 1).isDriver)
     assert(!BlockManagerId("notADriverIdentifier", "XXX", 1).isDriver)
   }
 
@@ -278,14 +275,19 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     eventually(timeout(1000 milliseconds), interval(10 milliseconds)) {
       assert(!store.hasLocalBlock("a1-to-remove"))
       master.getLocations("a1-to-remove") should have size 0
+      assertUpdateBlockInfoReportedForRemovingBlock(store, "a1-to-remove",
+        removedFromMemory = true, removedFromDisk = false)
     }
     eventually(timeout(1000 milliseconds), interval(10 milliseconds)) {
       assert(!store.hasLocalBlock("a2-to-remove"))
       master.getLocations("a2-to-remove") should have size 0
+      assertUpdateBlockInfoReportedForRemovingBlock(store, "a2-to-remove",
+        removedFromMemory = true, removedFromDisk = false)
     }
     eventually(timeout(1000 milliseconds), interval(10 milliseconds)) {
       assert(store.hasLocalBlock("a3-to-remove"))
       master.getLocations("a3-to-remove") should have size 0
+      assertUpdateBlockInfoNotReported(store, "a3-to-remove")
     }
     eventually(timeout(1000 milliseconds), interval(10 milliseconds)) {
       val memStatus = master.getMemoryStatus.head._2
@@ -364,16 +366,21 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     assert(!executorStore.hasLocalBlock(broadcast0BlockId))
     assert(executorStore.hasLocalBlock(broadcast1BlockId))
     assert(executorStore.hasLocalBlock(broadcast2BlockId))
+    assertUpdateBlockInfoReportedForRemovingBlock(executorStore, broadcast0BlockId,
+      removedFromMemory = false, removedFromDisk = true)
 
     // nothing should be removed from the driver store
     assert(driverStore.hasLocalBlock(broadcast0BlockId))
     assert(driverStore.hasLocalBlock(broadcast1BlockId))
     assert(driverStore.hasLocalBlock(broadcast2BlockId))
+    assertUpdateBlockInfoNotReported(driverStore, broadcast0BlockId)
 
     // remove broadcast 0 block from the driver as well
     master.removeBroadcast(0, removeFromMaster = true, blocking = true)
     assert(!driverStore.hasLocalBlock(broadcast0BlockId))
     assert(driverStore.hasLocalBlock(broadcast1BlockId))
+    assertUpdateBlockInfoReportedForRemovingBlock(driverStore, broadcast0BlockId,
+      removedFromMemory = false, removedFromDisk = true)
 
     // remove broadcast 1 block from both the stores asynchronously
     // and verify all broadcast 1 blocks have been removed
@@ -381,6 +388,10 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     eventually(timeout(1000 milliseconds), interval(10 milliseconds)) {
       assert(!driverStore.hasLocalBlock(broadcast1BlockId))
       assert(!executorStore.hasLocalBlock(broadcast1BlockId))
+      assertUpdateBlockInfoReportedForRemovingBlock(driverStore, broadcast1BlockId,
+        removedFromMemory = false, removedFromDisk = true)
+      assertUpdateBlockInfoReportedForRemovingBlock(executorStore, broadcast1BlockId,
+        removedFromMemory = false, removedFromDisk = true)
     }
 
     // remove broadcast 2 from both the stores asynchronously
@@ -391,9 +402,44 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
       assert(!driverStore.hasLocalBlock(broadcast2BlockId2))
       assert(!executorStore.hasLocalBlock(broadcast2BlockId))
       assert(!executorStore.hasLocalBlock(broadcast2BlockId2))
+      assertUpdateBlockInfoReportedForRemovingBlock(driverStore, broadcast2BlockId,
+        removedFromMemory = false, removedFromDisk = true)
+      assertUpdateBlockInfoReportedForRemovingBlock(driverStore, broadcast2BlockId2,
+        removedFromMemory = false, removedFromDisk = true)
+      assertUpdateBlockInfoReportedForRemovingBlock(executorStore, broadcast2BlockId,
+        removedFromMemory = false, removedFromDisk = true)
+      assertUpdateBlockInfoReportedForRemovingBlock(executorStore, broadcast2BlockId2,
+        removedFromMemory = false, removedFromDisk = true)
     }
     executorStore.stop()
     driverStore.stop()
+  }
+
+  private def assertUpdateBlockInfoReportedForRemovingBlock(
+      store: BlockManager,
+      blockId: BlockId,
+      removedFromMemory: Boolean,
+      removedFromDisk: Boolean): Unit = {
+    def assertSizeReported(captor: ArgumentCaptor[Long], expectRemoved: Boolean): Unit = {
+      assert(captor.getAllValues().size() === 1)
+      if (expectRemoved) {
+        assert(captor.getValue() > 0)
+      } else {
+        assert(captor.getValue() === 0)
+      }
+    }
+
+    val memSizeCaptor = ArgumentCaptor.forClass(classOf[Long]).asInstanceOf[ArgumentCaptor[Long]]
+    val diskSizeCaptor = ArgumentCaptor.forClass(classOf[Long]).asInstanceOf[ArgumentCaptor[Long]]
+    verify(master).updateBlockInfo(mc.eq(store.blockManagerId), mc.eq(blockId),
+      mc.eq(StorageLevel.NONE), memSizeCaptor.capture(), diskSizeCaptor.capture())
+    assertSizeReported(memSizeCaptor, removedFromMemory)
+    assertSizeReported(diskSizeCaptor, removedFromDisk)
+  }
+
+  private def assertUpdateBlockInfoNotReported(store: BlockManager, blockId: BlockId): Unit = {
+    verify(master, never()).updateBlockInfo(mc.eq(store.blockManagerId), mc.eq(blockId),
+      mc.eq(StorageLevel.NONE), mc.anyInt(), mc.anyInt())
   }
 
   test("reregistration on heart beat") {
@@ -410,7 +456,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
 
     val reregister = !master.driverEndpoint.askSync[Boolean](
       BlockManagerHeartbeat(store.blockManagerId))
-    assert(reregister)
+    assert(reregister == true)
   }
 
   test("reregistration on block update") {
@@ -567,7 +613,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
       "list1",
       StorageLevel.MEMORY_ONLY,
       ClassTag.Any,
-      () => fail("attempted to compute locally")).isLeft)
+      () => throw new AssertionError("attempted to compute locally")).isLeft)
   }
 
   test("in-memory LRU storage") {
@@ -830,7 +876,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
 
   test("block compression") {
     try {
-      conf.set(SHUFFLE_COMPRESS, true)
+      conf.set("spark.shuffle.compress", "true")
       var store = makeBlockManager(20000, "exec1")
       store.putSingle(
         ShuffleBlockId(0, 0, 0), new Array[Byte](1000), StorageLevel.MEMORY_ONLY_SER)
@@ -838,7 +884,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
         "shuffle_0_0_0 was not compressed")
       stopBlockManager(store)
 
-      conf.set(SHUFFLE_COMPRESS, false)
+      conf.set("spark.shuffle.compress", "false")
       store = makeBlockManager(20000, "exec2")
       store.putSingle(
         ShuffleBlockId(0, 0, 0), new Array[Byte](10000), StorageLevel.MEMORY_ONLY_SER)
@@ -846,7 +892,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
         "shuffle_0_0_0 was compressed")
       stopBlockManager(store)
 
-      conf.set(BROADCAST_COMPRESS, true)
+      conf.set("spark.broadcast.compress", "true")
       store = makeBlockManager(20000, "exec3")
       store.putSingle(
         BroadcastBlockId(0), new Array[Byte](10000), StorageLevel.MEMORY_ONLY_SER)
@@ -854,20 +900,20 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
         "broadcast_0 was not compressed")
       stopBlockManager(store)
 
-      conf.set(BROADCAST_COMPRESS, false)
+      conf.set("spark.broadcast.compress", "false")
       store = makeBlockManager(20000, "exec4")
       store.putSingle(
         BroadcastBlockId(0), new Array[Byte](10000), StorageLevel.MEMORY_ONLY_SER)
       assert(store.memoryStore.getSize(BroadcastBlockId(0)) >= 10000, "broadcast_0 was compressed")
       stopBlockManager(store)
 
-      conf.set(RDD_COMPRESS, true)
+      conf.set("spark.rdd.compress", "true")
       store = makeBlockManager(20000, "exec5")
       store.putSingle(rdd(0, 0), new Array[Byte](10000), StorageLevel.MEMORY_ONLY_SER)
       assert(store.memoryStore.getSize(rdd(0, 0)) <= 1000, "rdd_0_0 was not compressed")
       stopBlockManager(store)
 
-      conf.set(RDD_COMPRESS, false)
+      conf.set("spark.rdd.compress", "false")
       store = makeBlockManager(20000, "exec6")
       store.putSingle(rdd(0, 0), new Array[Byte](10000), StorageLevel.MEMORY_ONLY_SER)
       assert(store.memoryStore.getSize(rdd(0, 0)) >= 10000, "rdd_0_0 was compressed")
@@ -879,22 +925,22 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
       assert(store.memoryStore.getSize("other_block") >= 10000, "other_block was compressed")
       stopBlockManager(store)
     } finally {
-      System.clearProperty(SHUFFLE_COMPRESS.key)
-      System.clearProperty(BROADCAST_COMPRESS.key)
-      System.clearProperty(RDD_COMPRESS.key)
+      System.clearProperty("spark.shuffle.compress")
+      System.clearProperty("spark.broadcast.compress")
+      System.clearProperty("spark.rdd.compress")
     }
   }
 
   test("block store put failure") {
     // Use Java serializer so we can create an unserializable error.
-    conf.set(TEST_MEMORY, 1200L)
+    conf.set("spark.testing.memory", "1200")
     val transfer = new NettyBlockTransferService(conf, securityMgr, "localhost", "localhost", 0, 1)
     val memoryManager = UnifiedMemoryManager(conf, numCores = 1)
     val serializerManager = new SerializerManager(new JavaSerializer(conf), conf)
     val store = new BlockManager(SparkContext.DRIVER_IDENTIFIER, rpcEnv, master,
       serializerManager, conf, memoryManager, mapOutputTracker,
       shuffleManager, transfer, securityMgr, 0)
-    allStores += store
+    memoryManager.setMemoryStore(store.memoryStore)
     store.initialize("app-id")
 
     // The put should fail since a1 is not serializable.
@@ -907,48 +953,6 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     // Make sure get a1 doesn't hang and returns None.
     failAfter(1 second) {
       assert(store.getSingleAndReleaseLock("a1").isEmpty, "a1 should not be in store")
-    }
-  }
-
-  def testPutBlockDataAsStream(blockManager: BlockManager, storageLevel: StorageLevel): Unit = {
-    val message = "message"
-    val ser = serializer.newInstance().serialize(message).array()
-    val blockId = new RDDBlockId(0, 0)
-    val streamCallbackWithId =
-      blockManager.putBlockDataAsStream(blockId, storageLevel, ClassTag(message.getClass))
-    streamCallbackWithId.onData("0", ByteBuffer.wrap(ser))
-    streamCallbackWithId.onComplete("0")
-    val blockStatusOption = blockManager.getStatus(blockId)
-    assert(!blockStatusOption.isEmpty)
-    val blockStatus = blockStatusOption.get
-    assert((blockStatus.diskSize > 0) === !storageLevel.useMemory)
-    assert((blockStatus.memSize > 0) === storageLevel.useMemory)
-    assert(blockManager.getBlockData(blockId).nioByteBuffer().array() === ser)
-  }
-
-  Seq(
-    "caching" -> StorageLevel.MEMORY_ONLY,
-    "caching, serialized" -> StorageLevel.MEMORY_ONLY_SER,
-    "caching on disk" -> StorageLevel.DISK_ONLY
-  ).foreach { case (name, storageLevel) =>
-    encryptionTest(s"test putBlockDataAsStream with $name") { conf =>
-      init(conf)
-      val ioEncryptionKey =
-        if (conf.get(IO_ENCRYPTION_ENABLED)) Some(CryptoStreamUtils.createKey(conf)) else None
-      val securityMgr = new SecurityManager(conf, ioEncryptionKey)
-      val serializerManager = new SerializerManager(serializer, conf, ioEncryptionKey)
-      val transfer =
-        new NettyBlockTransferService(conf, securityMgr, "localhost", "localhost", 0, 1)
-      val memoryManager = UnifiedMemoryManager(conf, numCores = 1)
-      val blockManager = new BlockManager(SparkContext.DRIVER_IDENTIFIER, rpcEnv, master,
-        serializerManager, conf, memoryManager, mapOutputTracker,
-        shuffleManager, transfer, securityMgr, 0)
-      try {
-        blockManager.initialize("app-id")
-        testPutBlockDataAsStream(blockManager, storageLevel)
-      } finally {
-        blockManager.stop()
-      }
     }
   }
 
@@ -1288,7 +1292,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
 
   test("SPARK-13328: refresh block locations (fetch should fail after hitting a threshold)") {
     val mockBlockTransferService =
-      new MockBlockTransferService(conf.get(BLOCK_FAILURES_BEFORE_LOCATION_REFRESH))
+      new MockBlockTransferService(conf.getInt("spark.block.failures.beforeLocationRefresh", 5))
     val store =
       makeBlockManager(8000, "executor1", transferService = Option(mockBlockTransferService))
     store.putSingle("item", 999L, StorageLevel.MEMORY_ONLY, tellMaster = true)
@@ -1297,7 +1301,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
 
   test("SPARK-13328: refresh block locations (fetch should succeed after location refresh)") {
     val maxFailuresBeforeLocationRefresh =
-      conf.get(BLOCK_FAILURES_BEFORE_LOCATION_REFRESH)
+      conf.getInt("spark.block.failures.beforeLocationRefresh", 5)
     val mockBlockManagerMaster = mock(classOf[BlockManagerMaster])
     val mockBlockTransferService =
       new MockBlockTransferService(maxFailuresBeforeLocationRefresh)
@@ -1360,76 +1364,74 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     val tryAgainExecutor = "tryAgainExecutor"
     val succeedingExecutor = "succeedingExecutor"
 
-    val failure = new Exception(tryAgainMsg)
-    val success = ByteBuffer.wrap(new Array[Byte](0))
+    // a server which delays response 50ms and must try twice for success.
+    def newShuffleServer(port: Int): (TransportServer, Int) = {
+      val failure = new Exception(tryAgainMsg)
+      val success = ByteBuffer.wrap(new Array[Byte](0))
 
-    var secondExecutorFailedOnce = false
-    var thirdExecutorFailedOnce = false
+      var secondExecutorFailedOnce = false
+      var thirdExecutorFailedOnce = false
 
-    val handler = new NoOpRpcHandler {
-      override def receive(
-          client: TransportClient,
-          message: ByteBuffer,
-          callback: RpcResponseCallback): Unit = {
-        val msgObj = BlockTransferMessage.Decoder.fromByteBuffer(message)
-        msgObj match {
+      val handler = new NoOpRpcHandler {
+        override def receive(
+            client: TransportClient,
+            message: ByteBuffer,
+            callback: RpcResponseCallback): Unit = {
+          val msgObj = BlockTransferMessage.Decoder.fromByteBuffer(message)
+          msgObj match {
 
-          case exec: RegisterExecutor if exec.execId == timingoutExecutor =>
-            () // No reply to generate client-side timeout
+            case exec: RegisterExecutor if exec.execId == timingoutExecutor =>
+              () // No reply to generate client-side timeout
 
-          case exec: RegisterExecutor
-            if exec.execId == tryAgainExecutor && !secondExecutorFailedOnce =>
-            secondExecutorFailedOnce = true
-            callback.onFailure(failure)
+            case exec: RegisterExecutor
+              if exec.execId == tryAgainExecutor && !secondExecutorFailedOnce =>
+              secondExecutorFailedOnce = true
+              callback.onFailure(failure)
 
-          case exec: RegisterExecutor if exec.execId == tryAgainExecutor =>
-            callback.onSuccess(success)
+            case exec: RegisterExecutor if exec.execId == tryAgainExecutor =>
+              callback.onSuccess(success)
 
-          case exec: RegisterExecutor
-            if exec.execId == succeedingExecutor && !thirdExecutorFailedOnce =>
-            thirdExecutorFailedOnce = true
-            callback.onFailure(failure)
+            case exec: RegisterExecutor
+              if exec.execId == succeedingExecutor && !thirdExecutorFailedOnce =>
+              thirdExecutorFailedOnce = true
+              callback.onFailure(failure)
 
-          case exec: RegisterExecutor if exec.execId == succeedingExecutor =>
-            callback.onSuccess(success)
+            case exec: RegisterExecutor if exec.execId == succeedingExecutor =>
+              callback.onSuccess(success)
 
+          }
         }
       }
+
+      val transConf = SparkTransportConf.fromSparkConf(conf, "shuffle", numUsableCores = 0)
+      val transCtx = new TransportContext(transConf, handler, true)
+      (transCtx.createServer(port, Seq.empty[TransportServerBootstrap].asJava), port)
     }
 
-    val transConf = SparkTransportConf.fromSparkConf(conf, "shuffle", numUsableCores = 0)
+    val candidatePort = RandomUtils.nextInt(1024, 65536)
+    val (server, shufflePort) = Utils.startServiceOnPort(candidatePort,
+      newShuffleServer, conf, "ShuffleServer")
 
-    Utils.tryWithResource(new TransportContext(transConf, handler, true)) { transCtx =>
-      // a server which delays response 50ms and must try twice for success.
-      def newShuffleServer(port: Int): (TransportServer, Int) = {
-        (transCtx.createServer(port, Seq.empty[TransportServerBootstrap].asJava), port)
-      }
+    conf.set(SHUFFLE_SERVICE_ENABLED.key, "true")
+    conf.set(SHUFFLE_SERVICE_PORT.key, shufflePort.toString)
+    conf.set(SHUFFLE_REGISTRATION_TIMEOUT.key, "40")
+    conf.set(SHUFFLE_REGISTRATION_MAX_ATTEMPTS.key, "1")
+    var e = intercept[SparkException] {
+      makeBlockManager(8000, timingoutExecutor)
+    }.getMessage
+    assert(e.contains("TimeoutException"))
 
-      val candidatePort = RandomUtils.nextInt(1024, 65536)
-      val (server, shufflePort) = Utils.startServiceOnPort(candidatePort,
-        newShuffleServer, conf, "ShuffleServer")
+    conf.set(SHUFFLE_REGISTRATION_TIMEOUT.key, "1000")
+    conf.set(SHUFFLE_REGISTRATION_MAX_ATTEMPTS.key, "1")
+    e = intercept[SparkException] {
+      makeBlockManager(8000, tryAgainExecutor)
+    }.getMessage
+    assert(e.contains(tryAgainMsg))
 
-      conf.set(SHUFFLE_SERVICE_ENABLED.key, "true")
-      conf.set(SHUFFLE_SERVICE_PORT.key, shufflePort.toString)
-      conf.set(SHUFFLE_REGISTRATION_TIMEOUT.key, "40")
-      conf.set(SHUFFLE_REGISTRATION_MAX_ATTEMPTS.key, "1")
-      var e = intercept[SparkException] {
-        makeBlockManager(8000, timingoutExecutor)
-      }.getMessage
-      assert(e.contains("TimeoutException"))
-
-      conf.set(SHUFFLE_REGISTRATION_TIMEOUT.key, "1000")
-      conf.set(SHUFFLE_REGISTRATION_MAX_ATTEMPTS.key, "1")
-      e = intercept[SparkException] {
-        makeBlockManager(8000, tryAgainExecutor)
-      }.getMessage
-      assert(e.contains(tryAgainMsg))
-
-      conf.set(SHUFFLE_REGISTRATION_TIMEOUT.key, "1000")
-      conf.set(SHUFFLE_REGISTRATION_MAX_ATTEMPTS.key, "2")
-      makeBlockManager(8000, succeedingExecutor)
-      server.close()
-    }
+    conf.set(SHUFFLE_REGISTRATION_TIMEOUT.key, "1000")
+    conf.set(SHUFFLE_REGISTRATION_MAX_ATTEMPTS.key, "2")
+    makeBlockManager(8000, succeedingExecutor)
+    server.close()
   }
 
   test("fetch remote block to local disk if block size is larger than threshold") {

@@ -20,6 +20,7 @@ package org.apache.spark.deploy.yarn
 import java.util.Collections
 import java.util.concurrent._
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.regex.Pattern
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
@@ -36,7 +37,6 @@ import org.apache.spark.deploy.yarn.YarnSparkHadoopUtil._
 import org.apache.spark.deploy.yarn.config._
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
-import org.apache.spark.internal.config.Python._
 import org.apache.spark.rpc.{RpcCallContext, RpcEndpointRef}
 import org.apache.spark.scheduler.{ExecutorExited, ExecutorLossReason}
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RemoveExecutor
@@ -128,7 +128,7 @@ private[yarn] class YarnAllocator(
   private var numUnexpectedContainerRelease = 0L
   private val containerIdToExecutorId = new HashMap[ContainerId, String]
 
-  // Executor memory in MiB.
+  // Executor memory in MB.
   protected val executorMemory = sparkConf.get(EXECUTOR_MEMORY).toInt
   // Additional memory overhead.
   protected val memoryOverhead: Int = sparkConf.get(EXECUTOR_MEMORY_OVERHEAD).getOrElse(
@@ -140,18 +140,10 @@ private[yarn] class YarnAllocator(
   }
   // Number of cores per executor.
   protected val executorCores = sparkConf.get(EXECUTOR_CORES)
-
-  private val executorResourceRequests =
-    sparkConf.getAllWithPrefix(config.YARN_EXECUTOR_RESOURCE_TYPES_PREFIX).toMap
-
-  // Resource capability requested for each executor
-  private[yarn] val resource: Resource = {
-    val resource = Resource.newInstance(
-      executorMemory + memoryOverhead + pysparkWorkerMemory, executorCores)
-    ResourceRequestHelper.setResourceRequests(executorResourceRequests, resource)
-    logDebug(s"Created resource capability: $resource")
-    resource
-  }
+  // Resource capability requested for each executors
+  private[yarn] val resource = Resource.newInstance(
+    executorMemory + memoryOverhead + pysparkWorkerMemory,
+    executorCores)
 
   private val launcherPool = ThreadUtils.newDaemonCachedThreadPool(
     "ContainerLauncher", sparkConf.get(CONTAINER_LAUNCH_MAX_THREADS))
@@ -305,16 +297,9 @@ private[yarn] class YarnAllocator(
       hostToLocalTaskCounts, pendingAllocate)
 
     if (missing > 0) {
-      if (log.isInfoEnabled()) {
-        var requestContainerMessage = s"Will request $missing executor container(s), each with " +
-            s"${resource.getVirtualCores} core(s) and " +
-            s"${resource.getMemory} MB memory (including $memoryOverhead MB of overhead)"
-        if (ResourceRequestHelper.isYarnResourceTypesAvailable() &&
-            executorResourceRequests.nonEmpty) {
-          requestContainerMessage ++= s" with custom resources: " + resource.toString
-        }
-        logInfo(requestContainerMessage)
-      }
+      logInfo(s"Will request $missing executor container(s), each with " +
+        s"${resource.getVirtualCores} core(s) and " +
+        s"${resource.getMemory} MB memory (including $memoryOverhead MB of overhead)")
 
       // cancel "stale" requests for locations that are no longer needed
       staleRequests.foreach { stale =>
@@ -381,6 +366,13 @@ private[yarn] class YarnAllocator(
     }
   }
 
+  def stop(): Unit = {
+    // Forcefully shut down the launcher pool, in case this is being called in the middle of
+    // container allocation. This will prevent queued executors from being started - and
+    // potentially interrupt active ExecutorRunnable instaces too.
+    launcherPool.shutdownNow()
+  }
+
   private def hostStr(request: ContainerRequest): String = {
     Option(request.getNodes) match {
       case Some(nodes) => nodes.asScala.mkString(",")
@@ -417,12 +409,40 @@ private[yarn] class YarnAllocator(
         containersToUse, remainingAfterHostMatches)
     }
 
-    // Match remaining by rack
+    // Match remaining by rack. Because YARN's RackResolver swallows thread interrupts
+    // (see SPARK-27094), which can cause this code to miss interrupts from the AM, use
+    // a separate thread to perform the operation.
     val remainingAfterRackMatches = new ArrayBuffer[Container]
-    for (allocatedContainer <- remainingAfterHostMatches) {
-      val rack = resolver.resolve(conf, allocatedContainer.getNodeId.getHost)
-      matchContainerToRequest(allocatedContainer, rack, containersToUse,
-        remainingAfterRackMatches)
+    if (remainingAfterHostMatches.nonEmpty) {
+      var exception: Option[Throwable] = None
+      val thread = new Thread("spark-rack-resolver") {
+        override def run(): Unit = {
+          try {
+            for (allocatedContainer <- remainingAfterHostMatches) {
+              val rack = resolver.resolve(conf, allocatedContainer.getNodeId.getHost)
+              matchContainerToRequest(allocatedContainer, rack, containersToUse,
+                remainingAfterRackMatches)
+            }
+          } catch {
+            case e: Throwable =>
+              exception = Some(e)
+          }
+        }
+      }
+      thread.setDaemon(true)
+      thread.start()
+
+      try {
+        thread.join()
+      } catch {
+        case e: InterruptedException =>
+          thread.interrupt()
+          throw e
+      }
+
+      if (exception.isDefined) {
+        throw exception.get
+      }
     }
 
     // Assign remaining that are neither node-local nor rack-local
@@ -466,20 +486,13 @@ private[yarn] class YarnAllocator(
     // memory, but use the asked vcore count for matching, effectively disabling matching on vcore
     // count.
     val matchingResource = Resource.newInstance(allocatedContainer.getResource.getMemory,
-      resource.getVirtualCores)
-
-    ResourceRequestHelper.setResourceRequests(executorResourceRequests, matchingResource)
-
-    logDebug(s"Calling amClient.getMatchingRequests with parameters: " +
-        s"priority: ${allocatedContainer.getPriority}, " +
-        s"location: $location, resource: $matchingResource")
+          resource.getVirtualCores)
     val matchingRequests = amClient.getMatchingRequests(allocatedContainer.getPriority, location,
       matchingResource)
 
     // Match the allocation to a request
     if (!matchingRequests.isEmpty) {
       val containerRequest = matchingRequests.get(0).iterator.next
-      logDebug(s"Removing container request via AM client: $containerRequest")
       amClient.removeContainerRequest(containerRequest)
       containersToUse += allocatedContainer
     } else {
@@ -593,21 +606,13 @@ private[yarn] class YarnAllocator(
             (false, s"Container ${containerId}${onHostStr} was preempted.")
           // Should probably still count memory exceeded exit codes towards task failures
           case VMEM_EXCEEDED_EXIT_CODE =>
-            val vmemExceededPattern = raw"$MEM_REGEX of $MEM_REGEX virtual memory used".r
-            val diag = vmemExceededPattern.findFirstIn(completedContainer.getDiagnostics)
-              .map(_.concat(".")).getOrElse("")
-            val message = "Container killed by YARN for exceeding virtual memory limits. " +
-              s"$diag Consider boosting ${EXECUTOR_MEMORY_OVERHEAD.key} or boosting " +
-              s"${YarnConfiguration.NM_VMEM_PMEM_RATIO} or disabling " +
-              s"${YarnConfiguration.NM_VMEM_CHECK_ENABLED} because of YARN-4714."
-            (true, message)
+            (true, memLimitExceededLogMessage(
+              completedContainer.getDiagnostics,
+              VMEM_EXCEEDED_PATTERN))
           case PMEM_EXCEEDED_EXIT_CODE =>
-            val pmemExceededPattern = raw"$MEM_REGEX of $MEM_REGEX physical memory used".r
-            val diag = pmemExceededPattern.findFirstIn(completedContainer.getDiagnostics)
-              .map(_.concat(".")).getOrElse("")
-            val message = "Container killed by YARN for exceeding physical memory limits. " +
-              s"$diag Consider boosting ${EXECUTOR_MEMORY_OVERHEAD.key}."
-            (true, message)
+            (true, memLimitExceededLogMessage(
+              completedContainer.getDiagnostics,
+              PMEM_EXCEEDED_PATTERN))
           case other_exit_status =>
             // SPARK-26269: follow YARN's blacklisting behaviour(see https://github
             // .com/apache/hadoop/blob/228156cfd1b474988bc4fedfbf7edddc87db41e3/had
@@ -748,9 +753,20 @@ private[yarn] class YarnAllocator(
 
 private object YarnAllocator {
   val MEM_REGEX = "[0-9.]+ [KMG]B"
+  val PMEM_EXCEEDED_PATTERN =
+    Pattern.compile(s"$MEM_REGEX of $MEM_REGEX physical memory used")
+  val VMEM_EXCEEDED_PATTERN =
+    Pattern.compile(s"$MEM_REGEX of $MEM_REGEX virtual memory used")
   val VMEM_EXCEEDED_EXIT_CODE = -103
   val PMEM_EXCEEDED_EXIT_CODE = -104
 
+  def memLimitExceededLogMessage(diagnostics: String, pattern: Pattern): String = {
+    val matcher = pattern.matcher(diagnostics)
+    val diag = if (matcher.find()) " " + matcher.group() + "." else ""
+    s"Container killed by YARN for exceeding memory limits. $diag " +
+      "Consider boosting spark.yarn.executor.memoryOverhead or " +
+      "disabling yarn.nodemanager.vmem-check-enabled because of YARN-4714."
+  }
   val NOT_APP_AND_SYSTEM_FAULT_EXIT_STATUS = Set(
     ContainerExitStatus.KILLED_BY_RESOURCEMANAGER,
     ContainerExitStatus.KILLED_BY_APPMASTER,

@@ -280,7 +280,7 @@ class HiveThriftBinaryServerSuite extends HiveThriftJdbcTest {
     var defaultV2: String = null
     var data: ArrayBuffer[Int] = null
 
-    withMultipleConnectionJdbcStatement("test_map", "db1.test_map2")(
+    withMultipleConnectionJdbcStatement("test_map")(
       // create table
       { statement =>
 
@@ -653,7 +653,7 @@ class SingleSessionSuite extends HiveThriftJdbcTest {
     "--conf spark.sql.hive.thriftServer.singleSession=true" :: Nil
 
   test("share the temporary functions across JDBC connections") {
-    withMultipleConnectionJdbcStatement()(
+    withMultipleConnectionJdbcStatement("test_udtf")(
       { statement =>
         val jarPath = "../hive/src/test/resources/TestUDTF.jar"
         val jarURL = s"file://${System.getProperty("user.dir")}/$jarPath"
@@ -812,22 +812,6 @@ abstract class HiveThriftJdbcTest extends HiveThriftServer2Test {
     } finally {
       tableNames.foreach { name =>
         statements(0).execute(s"DROP TABLE IF EXISTS $name")
-      }
-      statements.foreach(_.close())
-      connections.foreach(_.close())
-    }
-  }
-
-  def withDatabase(dbNames: String*)(fs: (Statement => Unit)*) {
-    val user = System.getProperty("user.name")
-    val connections = fs.map { _ => DriverManager.getConnection(jdbcUri, user, "") }
-    val statements = connections.map(_.createStatement())
-
-    try {
-      statements.zip(fs).foreach { case (s, f) => f(s) }
-    } finally {
-      dbNames.foreach { name =>
-        statements(0).execute(s"DROP DATABASE IF EXISTS $name")
       }
       statements.foreach(_.close())
       connections.foreach(_.close())

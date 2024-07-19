@@ -240,20 +240,15 @@ class SparkSqlParserSuite extends AnalysisTest {
   }
 
   test("SPARK-17328 Fix NPE with EXPLAIN DESCRIBE TABLE") {
-    assertEqual("describe t",
-      DescribeTableCommand(TableIdentifier("t"), Map.empty, isExtended = false))
     assertEqual("describe table t",
-      DescribeTableCommand(TableIdentifier("t"), Map.empty, isExtended = false))
+      DescribeTableCommand(
+        TableIdentifier("t"), Map.empty, isExtended = false))
     assertEqual("describe table extended t",
-      DescribeTableCommand(TableIdentifier("t"), Map.empty, isExtended = true))
+      DescribeTableCommand(
+        TableIdentifier("t"), Map.empty, isExtended = true))
     assertEqual("describe table formatted t",
-      DescribeTableCommand(TableIdentifier("t"), Map.empty, isExtended = true))
-  }
-
-  test("describe query") {
-    val query = "SELECT * FROM t"
-    assertEqual("DESCRIBE QUERY " + query, DescribeQueryCommand(parser.parsePlan(query)))
-    assertEqual("DESCRIBE " + query, DescribeQueryCommand(parser.parsePlan(query)))
+      DescribeTableCommand(
+        TableIdentifier("t"), Map.empty, isExtended = true))
   }
 
   test("describe table column") {
@@ -328,22 +323,12 @@ class SparkSqlParserSuite extends AnalysisTest {
     intercept("ANALYZE TABLE t COMPUTE STATISTICS FOR COLUMNS", "")
 
     assertEqual("ANALYZE TABLE t COMPUTE STATISTICS FOR COLUMNS key, value",
-      AnalyzeColumnCommand(TableIdentifier("t"), Option(Seq("key", "value")), allColumns = false))
+      AnalyzeColumnCommand(TableIdentifier("t"), Seq("key", "value")))
 
     // Partition specified - should be ignored
     assertEqual("ANALYZE TABLE t PARTITION(ds='2017-06-10') " +
       "COMPUTE STATISTICS FOR COLUMNS key, value",
-      AnalyzeColumnCommand(TableIdentifier("t"), Option(Seq("key", "value")), allColumns = false))
-
-    // Partition specified should be ignored in case of COMPUTE STATISTICS FOR ALL COLUMNS
-    assertEqual("ANALYZE TABLE t PARTITION(ds='2017-06-10') " +
-      "COMPUTE STATISTICS FOR ALL COLUMNS",
-      AnalyzeColumnCommand(TableIdentifier("t"), None, allColumns = true))
-
-    intercept("ANALYZE TABLE t COMPUTE STATISTICS FOR ALL COLUMNS key, value",
-      "mismatched input 'key' expecting <EOF>")
-    intercept("ANALYZE TABLE t COMPUTE STATISTICS FOR ALL",
-      "missing 'COLUMNS' at '<EOF>'")
+      AnalyzeColumnCommand(TableIdentifier("t"), Seq("key", "value")))
   }
 
   test("query organization") {
@@ -391,13 +376,5 @@ class SparkSqlParserSuite extends AnalysisTest {
     intercept("ALTER VIEW testView AS FROM jt INSERT INTO tbl1 SELECT * WHERE jt.id < 5 " +
       "INSERT INTO tbl2 SELECT * WHERE jt.id > 4",
       "Operation not allowed: ALTER VIEW ... AS FROM ... [INSERT INTO ...]+")
-  }
-
-  test("database and schema tokens are interchangeable") {
-    assertEqual("CREATE DATABASE foo", parser.parsePlan("CREATE SCHEMA foo"))
-    assertEqual("DROP DATABASE foo", parser.parsePlan("DROP SCHEMA foo"))
-    assertEqual("ALTER DATABASE foo SET DBPROPERTIES ('x' = 'y')",
-      parser.parsePlan("ALTER SCHEMA foo SET DBPROPERTIES ('x' = 'y')"))
-    assertEqual("DESC DATABASE foo", parser.parsePlan("DESC SCHEMA foo"))
   }
 }

@@ -20,6 +20,8 @@ package org.apache.spark.sql.streaming
 import java.io.File
 import java.util.{Locale, TimeZone}
 
+import scala.collection.mutable
+
 import org.apache.commons.io.FileUtils
 import org.scalatest.{Assertions, BeforeAndAfterAll}
 
@@ -46,7 +48,13 @@ object FailureSingleton {
   var firstTime = true
 }
 
-class StreamingAggregationSuite extends StateStoreMetricsTest with Assertions {
+class StreamingAggregationSuite extends StateStoreMetricsTest
+    with BeforeAndAfterAll with Assertions {
+
+  override def afterAll(): Unit = {
+    super.afterAll()
+    StateStore.stop()
+  }
 
   import testImplicits._
 
@@ -183,7 +191,68 @@ class StreamingAggregationSuite extends StateStoreMetricsTest with Assertions {
     )
   }
 
-  testWithAllStateVersions("state metrics") {
+  testWithAllStateVersions("state metrics - append mode") {
+    val inputData = MemoryStream[Int]
+    val aggWithWatermark = inputData.toDF()
+      .withColumn("eventTime", $"value".cast("timestamp"))
+      .withWatermark("eventTime", "10 seconds")
+      .groupBy(window($"eventTime", "5 seconds") as 'window)
+      .agg(count("*") as 'count)
+      .select($"window".getField("start").cast("long").as[Long], $"count".as[Long])
+
+    implicit class RichStreamExecution(query: StreamExecution) {
+      // this could be either empty row batch or actual batch
+      def stateNodes: Seq[SparkPlan] = {
+        query.lastExecution.executedPlan.collect {
+          case p if p.isInstanceOf[StateStoreSaveExec] => p
+        }
+      }
+
+      def stateOperatorProgresses: Seq[StateOperatorProgress] = {
+        val operatorProgress = mutable.ArrayBuffer[StateOperatorProgress]()
+        var progress = query.recentProgress.last
+
+        operatorProgress ++= progress.stateOperators.map { op => op.copy(op.numRowsUpdated) }
+        if (progress.numInputRows == 0) {
+          // empty batch, merge metrics from previous batch as well
+          progress = query.recentProgress.takeRight(2).head
+          operatorProgress.zipWithIndex.foreach { case (sop, index) =>
+            // "numRowsUpdated" should be merged, as it could be updated in both batches.
+            // (for now it is only updated from previous batch, but things can be changed.)
+            // other metrics represent current status of state so picking up the latest values.
+            val newOperatorProgress = sop.copy(
+              sop.numRowsUpdated + progress.stateOperators(index).numRowsUpdated)
+            operatorProgress(index) = newOperatorProgress
+          }
+        }
+
+        operatorProgress
+      }
+    }
+
+    testStream(aggWithWatermark)(
+      AddData(inputData, 15),
+      CheckAnswer(), // watermark = 5
+      AssertOnQuery { _.stateNodes.size === 1 },
+      AssertOnQuery { _.stateNodes.head.metrics("numOutputRows").value === 0 },
+      AssertOnQuery { _.stateOperatorProgresses.head.numRowsUpdated === 1 },
+      AssertOnQuery { _.stateOperatorProgresses.head.numRowsTotal === 1 },
+      AddData(inputData, 10, 12, 14),
+      CheckAnswer(), // watermark = 5
+      AssertOnQuery { _.stateNodes.size === 1 },
+      AssertOnQuery { _.stateNodes.head.metrics("numOutputRows").value === 0 },
+      AssertOnQuery { _.stateOperatorProgresses.head.numRowsUpdated === 1 },
+      AssertOnQuery { _.stateOperatorProgresses.head.numRowsTotal === 2 },
+      AddData(inputData, 25),
+      CheckAnswer((10, 3)), // watermark = 15
+      AssertOnQuery { _.stateNodes.size === 1 },
+      AssertOnQuery { _.stateNodes.head.metrics("numOutputRows").value === 1 },
+      AssertOnQuery { _.stateOperatorProgresses.head.numRowsUpdated === 1 },
+      AssertOnQuery { _.stateOperatorProgresses.head.numRowsTotal === 2 }
+    )
+  }
+
+  testWithAllStateVersions("state metrics - update/complete mode") {
     val inputData = MemoryStream[Int]
 
     val aggregated =
@@ -207,15 +276,15 @@ class StreamingAggregationSuite extends StateStoreMetricsTest with Assertions {
       AddData(inputData, 1),
       CheckLastBatch((1, 1), (2, 1)),
       AssertOnQuery { _.stateNodes.size === 1 },
-      AssertOnQuery { _.stateNodes.head.metrics("numOutputRows").value === 2 },
-      AssertOnQuery { _.stateNodes.head.metrics("numUpdatedStateRows").value === 2 },
-      AssertOnQuery { _.stateNodes.head.metrics("numTotalStateRows").value === 2 },
+      AssertOnQuery { _.stateNodes.head.metrics.get("numOutputRows").get.value === 2 },
+      AssertOnQuery { _.stateNodes.head.metrics.get("numUpdatedStateRows").get.value === 2 },
+      AssertOnQuery { _.stateNodes.head.metrics.get("numTotalStateRows").get.value === 2 },
       AddData(inputData, 2, 3),
       CheckLastBatch((2, 2), (3, 2), (4, 1)),
       AssertOnQuery { _.stateNodes.size === 1 },
-      AssertOnQuery { _.stateNodes.head.metrics("numOutputRows").value === 3 },
-      AssertOnQuery { _.stateNodes.head.metrics("numUpdatedStateRows").value === 3 },
-      AssertOnQuery { _.stateNodes.head.metrics("numTotalStateRows").value === 4 }
+      AssertOnQuery { _.stateNodes.head.metrics.get("numOutputRows").get.value === 3 },
+      AssertOnQuery { _.stateNodes.head.metrics.get("numUpdatedStateRows").get.value === 3 },
+      AssertOnQuery { _.stateNodes.head.metrics.get("numTotalStateRows").get.value === 4 }
     )
 
     // Test with Complete mode
@@ -224,15 +293,15 @@ class StreamingAggregationSuite extends StateStoreMetricsTest with Assertions {
       AddData(inputData, 1),
       CheckLastBatch((1, 1), (2, 1)),
       AssertOnQuery { _.stateNodes.size === 1 },
-      AssertOnQuery { _.stateNodes.head.metrics("numOutputRows").value === 2 },
-      AssertOnQuery { _.stateNodes.head.metrics("numUpdatedStateRows").value === 2 },
-      AssertOnQuery { _.stateNodes.head.metrics("numTotalStateRows").value === 2 },
+      AssertOnQuery { _.stateNodes.head.metrics.get("numOutputRows").get.value === 2 },
+      AssertOnQuery { _.stateNodes.head.metrics.get("numUpdatedStateRows").get.value === 2 },
+      AssertOnQuery { _.stateNodes.head.metrics.get("numTotalStateRows").get.value === 2 },
       AddData(inputData, 2, 3),
       CheckLastBatch((1, 1), (2, 2), (3, 2), (4, 1)),
       AssertOnQuery { _.stateNodes.size === 1 },
-      AssertOnQuery { _.stateNodes.head.metrics("numOutputRows").value === 4 },
-      AssertOnQuery { _.stateNodes.head.metrics("numUpdatedStateRows").value === 3 },
-      AssertOnQuery { _.stateNodes.head.metrics("numTotalStateRows").value === 4 }
+      AssertOnQuery { _.stateNodes.head.metrics.get("numOutputRows").get.value === 4 },
+      AssertOnQuery { _.stateNodes.head.metrics.get("numUpdatedStateRows").get.value === 3 },
+      AssertOnQuery { _.stateNodes.head.metrics.get("numTotalStateRows").get.value === 4 }
     )
   }
 

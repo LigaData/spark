@@ -28,14 +28,14 @@ import scala.util.control.NonFatal
 
 import com.google.common.util.concurrent.MoreExecutors
 import org.mockito.ArgumentCaptor
-import org.mockito.ArgumentMatchers.{any, anyLong}
+import org.mockito.Matchers.{any, anyLong}
 import org.mockito.Mockito.{spy, times, verify}
 import org.scalatest.BeforeAndAfter
 import org.scalatest.concurrent.Eventually._
 
 import org.apache.spark._
+import org.apache.spark.TaskState.TaskState
 import org.apache.spark.TestUtils.JavaSourceFromString
-import org.apache.spark.internal.config.Network.RPC_MESSAGE_MAX_SIZE
 import org.apache.spark.storage.TaskResultBlockId
 import org.apache.spark.util.{MutableURLClassLoader, RpcUtils, Utils}
 
@@ -79,6 +79,16 @@ private class ResultDeletingTaskResultGetter(sparkEnv: SparkEnv, scheduler: Task
   }
 }
 
+private class DummyTaskSchedulerImpl(sc: SparkContext)
+  extends TaskSchedulerImpl(sc, 1, true) {
+  override def handleFailedTask(
+      taskSetManager: TaskSetManager,
+      tid: Long,
+      taskState: TaskState,
+      reason: TaskFailedReason): Unit = {
+    // do nothing
+  }
+}
 
 /**
  * A [[TaskResultGetter]] that stores the [[DirectTaskResult]]s it receives from executors
@@ -111,7 +121,7 @@ class TaskResultGetterSuite extends SparkFunSuite with BeforeAndAfter with Local
 
   // Set the RPC message size to be as small as possible (it must be an integer, so 1 is as small
   // as we can make it) so the tests don't take too long.
-  def conf: SparkConf = new SparkConf().set(RPC_MESSAGE_MAX_SIZE, 1)
+  def conf: SparkConf = new SparkConf().set("spark.rpc.message.maxSize", "1")
 
   test("handling results smaller than max RPC message size") {
     sc = new SparkContext("local", "test", conf)
@@ -129,6 +139,31 @@ class TaskResultGetterSuite extends SparkFunSuite with BeforeAndAfter with Local
     val RESULT_BLOCK_ID = TaskResultBlockId(0)
     assert(sc.env.blockManager.master.getLocations(RESULT_BLOCK_ID).size === 0,
       "Expect result to be removed from the block manager.")
+  }
+
+  test("handling total size of results larger than maxResultSize") {
+    sc = new SparkContext("local", "test", conf)
+    val scheduler = new DummyTaskSchedulerImpl(sc)
+    val spyScheduler = spy(scheduler)
+    val resultGetter = new TaskResultGetter(sc.env, spyScheduler)
+    scheduler.taskResultGetter = resultGetter
+    val myTsm = new TaskSetManager(spyScheduler, FakeTask.createTaskSet(2), 1) {
+      // always returns false
+      override def canFetchMoreResults(size: Long): Boolean = false
+    }
+    val indirectTaskResult = IndirectTaskResult(TaskResultBlockId(0), 0)
+    val directTaskResult = new DirectTaskResult(ByteBuffer.allocate(0), Nil)
+    val ser = sc.env.closureSerializer.newInstance()
+    val serializedIndirect = ser.serialize(indirectTaskResult)
+    val serializedDirect = ser.serialize(directTaskResult)
+    resultGetter.enqueueSuccessfulTask(myTsm, 0, serializedDirect)
+    resultGetter.enqueueSuccessfulTask(myTsm, 1, serializedIndirect)
+    eventually(timeout(1.second)) {
+      verify(spyScheduler, times(1)).handleFailedTask(
+        myTsm, 0, TaskState.KILLED, TaskKilled("Tasks result size has exceeded maxResultSize"))
+      verify(spyScheduler, times(1)).handleFailedTask(
+        myTsm, 1, TaskState.KILLED, TaskKilled("Tasks result size has exceeded maxResultSize"))
+    }
   }
 
   test("task retried if result missing from block manager") {
@@ -195,7 +230,7 @@ class TaskResultGetterSuite extends SparkFunSuite with BeforeAndAfter with Local
       // jar.
       sc = new SparkContext("local", "test", conf)
       val rdd = sc.parallelize(Seq(1), 1).map { _ =>
-        val exc = excClass.getConstructor().newInstance().asInstanceOf[Exception]
+        val exc = excClass.newInstance().asInstanceOf[Exception]
         throw exc
       }
 
@@ -266,9 +301,7 @@ class TaskResultGetterSuite extends SparkFunSuite with BeforeAndAfter with Local
 
 private class UndeserializableException extends Exception {
   private def readObject(in: ObjectInputStream): Unit = {
-    // scalastyle:off throwerror
     throw new NoClassDefFoundError()
-    // scalastyle:on throwerror
   }
 }
 

@@ -21,13 +21,12 @@ import java.io._
 import java.nio.ByteBuffer
 import java.nio.channels.{Channels, ReadableByteChannel, WritableByteChannel}
 import java.nio.channels.FileChannel.MapMode
-import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
+import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.mutable.ListBuffer
 
 import com.google.common.io.Closeables
 import io.netty.channel.DefaultFileRegion
-import org.apache.commons.io.FileUtils
 
 import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.internal.{config, Logging}
@@ -46,7 +45,7 @@ private[spark] class DiskStore(
     diskManager: DiskBlockManager,
     securityManager: SecurityManager) extends Logging {
 
-  private val minMemoryMapBytes = conf.get(config.STORAGE_MEMORY_MAP_THRESHOLD)
+  private val minMemoryMapBytes = conf.getSizeAsBytes("spark.storage.memoryMapThreshold", "2m")
   private val maxMemoryMapBytes = conf.get(config.MEMORY_MAP_LIMIT_FOR_TESTS)
   private val blockSizes = new ConcurrentHashMap[BlockId, Long]()
 
@@ -62,7 +61,7 @@ private[spark] class DiskStore(
       throw new IllegalStateException(s"Block $blockId is already present in the disk store")
     }
     logDebug(s"Attempting to put block $blockId")
-    val startTimeNs = System.nanoTime()
+    val startTime = System.currentTimeMillis
     val file = diskManager.getFile(blockId)
     val out = new CountingWritableChannel(openForWrite(file))
     var threwException: Boolean = true
@@ -85,8 +84,11 @@ private[spark] class DiskStore(
         }
       }
     }
-    logDebug(s"Block ${file.getName} stored as ${Utils.bytesToString(file.length())} file" +
-      s" on disk in ${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNs)} ms")
+    val finishTime = System.currentTimeMillis
+    logDebug("Block %s stored as %s file on disk in %d ms".format(
+      file.getName,
+      Utils.bytesToString(file.length()),
+      finishTime - startTime))
   }
 
   def putBytes(blockId: BlockId, bytes: ChunkedByteBuffer): Unit = {
@@ -96,17 +98,18 @@ private[spark] class DiskStore(
   }
 
   def getBytes(blockId: BlockId): BlockData = {
-    getBytes(diskManager.getFile(blockId.name), getSize(blockId))
-  }
+    val file = diskManager.getFile(blockId.name)
+    val blockSize = getSize(blockId)
 
-  def getBytes(f: File, blockSize: Long): BlockData = securityManager.getIOEncryptionKey() match {
-    case Some(key) =>
-      // Encrypted blocks cannot be memory mapped; return a special object that does decryption
-      // and provides InputStream / FileRegion implementations for reading the data.
-      new EncryptedBlockData(f, blockSize, conf, key)
+    securityManager.getIOEncryptionKey() match {
+      case Some(key) =>
+        // Encrypted blocks cannot be memory mapped; return a special object that does decryption
+        // and provides InputStream / FileRegion implementations for reading the data.
+        new EncryptedBlockData(file, blockSize, conf, key)
 
-    case _ =>
-      new DiskBlockData(minMemoryMapBytes, maxMemoryMapBytes, f, blockSize)
+      case _ =>
+        new DiskBlockData(minMemoryMapBytes, maxMemoryMapBytes, file, blockSize)
+    }
   }
 
   def remove(blockId: BlockId): Boolean = {
@@ -121,16 +124,6 @@ private[spark] class DiskStore(
     } else {
       false
     }
-  }
-
-  /**
-   * @param blockSize if encryption is configured, the file is assumed to already be encrypted and
-   *                  blockSize should be the decrypted size
-   */
-  def moveFileToBlock(sourceFile: File, blockSize: Long, targetBlockId: BlockId): Unit = {
-    blockSizes.put(targetBlockId, blockSize)
-    val targetFile = diskManager.getFile(targetBlockId.name)
-    FileUtils.moveFile(sourceFile, targetFile)
   }
 
   def contains(blockId: BlockId): Boolean = {

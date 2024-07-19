@@ -103,12 +103,12 @@ $(document).ready(function() {
       pageLength: 20
     });
 
-    var historySummary = $("#history-summary");
-    var searchString = historySummary["context"]["location"]["search"];
-    var requestedIncomplete = getParameterByName("showIncomplete", searchString);
+    historySummary = $("#history-summary");
+    searchString = historySummary["context"]["location"]["search"];
+    requestedIncomplete = getParameterByName("showIncomplete", searchString);
     requestedIncomplete = (requestedIncomplete == "true" ? true : false);
 
-    var appParams = {
+    appParams = {
       limit: appLimit,
       status: (requestedIncomplete ? "running" : "completed")
     };
@@ -116,7 +116,7 @@ $(document).ready(function() {
     $.getJSON(uiRoot + "/api/v1/applications", appParams, function(response,status,jqXHR) {
       var array = [];
       var hasMultipleAttempts = false;
-      for (var i in response) {
+      for (i in response) {
         var app = response[i];
         if (app["attempts"][0]["completed"] == requestedIncomplete) {
           continue; // if we want to show for Incomplete, we skip the completed apps; otherwise skip incomplete ones.
@@ -126,8 +126,8 @@ $(document).ready(function() {
         if (app["attempts"].length > 1) {
             hasMultipleAttempts = true;
         }
-        var num = app["attempts"].length;
-        for (var j in app["attempts"]) {
+
+        for (j in app["attempts"]) {
           var attempt = app["attempts"][j];
           attempt["startTime"] = formatTimeMillis(attempt["startTimeEpoch"]);
           attempt["endTime"] = formatTimeMillis(attempt["endTimeEpoch"]);
@@ -136,7 +136,8 @@ $(document).ready(function() {
             (attempt.hasOwnProperty("attemptId") ? attempt["attemptId"] + "/" : "") + "logs";
           attempt["durationMillisec"] = attempt["duration"];
           attempt["duration"] = formatDuration(attempt["duration"]);
-          var app_clone = {"id" : id, "name" : name, "num" : num, "attempts" : [attempt]};
+          var hasAttemptId = attempt.hasOwnProperty("attemptId");
+          var app_clone = {"id" : id, "name" : name, "hasAttemptId" : hasAttemptId, "attempts" : [attempt]};
           array.push(app_clone);
         }
       }
@@ -149,7 +150,7 @@ $(document).ready(function() {
         "applications": array,
         "hasMultipleAttempts": hasMultipleAttempts,
         "showCompletedColumns": !requestedIncomplete,
-      };
+      }
 
       $.get(uiRoot + "/static/historypage-template.html", function(template) {
         var sibling = historySummary.prev();
@@ -157,7 +158,7 @@ $(document).ready(function() {
         var apps = $(Mustache.render($(template).filter("#history-summary-template").html(),data));
         var attemptIdColumnName = 'attemptId';
         var startedColumnName = 'started';
-        var completedColumnName = 'completed';
+        var defaultSortColumn = completedColumnName = 'completed';
         var durationColumnName = 'duration';
         var conf = {
           "columns": [

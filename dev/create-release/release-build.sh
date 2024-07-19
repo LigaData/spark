@@ -84,7 +84,7 @@ GIT_REF=${GIT_REF:-master}
 
 RELEASE_STAGING_LOCATION="https://dist.apache.org/repos/dist/dev/spark"
 
-GPG="gpg -u $GPG_KEY --no-tty --batch --pinentry-mode loopback"
+GPG="gpg -u $GPG_KEY --no-tty --batch"
 NEXUS_ROOT=https://repository.apache.org/service/local/staging
 NEXUS_PROFILE=d63f592e7eac0 # Profile for Spark staging uploads
 BASE_DIR=$(pwd)
@@ -92,9 +92,12 @@ BASE_DIR=$(pwd)
 init_java
 init_maven_sbt
 
-rm -rf spark
-git clone "$ASF_REPO"
+# Only clone the repo fresh when not present, otherwise use checkout
+if [ ! -d spark ]; then
+  git clone "$ASF_REPO"
+fi
 cd spark
+git fetch
 git checkout $GIT_REF
 git_hash=`git rev-parse --short HEAD`
 echo "Checked out Spark git hash $git_hash"
@@ -103,7 +106,7 @@ if [ -z "$SPARK_VERSION" ]; then
   # Run $MVN in a separate command so that 'set -e' does the right thing.
   TMP=$(mktemp)
   $MVN help:evaluate -Dexpression=project.version > $TMP
-  SPARK_VERSION=$(cat $TMP | grep -v INFO | grep -v WARNING | grep -v Download)
+  SPARK_VERSION=$(cat $TMP | grep -v INFO | grep -v WARNING | grep -vi Download)
   rm $TMP
 fi
 
@@ -114,10 +117,8 @@ PUBLISH_SCALA_2_10=0
 SCALA_2_10_PROFILES="-Pscala-2.10"
 SCALA_2_11_PROFILES=
 if [[ $SPARK_VERSION > "2.3" ]]; then
-  BASE_PROFILES="$BASE_PROFILES -Pkubernetes"
-  if [[ $SPARK_VERSION < "3.0." ]]; then
-    SCALA_2_11_PROFILES="-Pkafka-0-8 -Pflume"
-  fi
+  BASE_PROFILES="$BASE_PROFILES -Pkubernetes -Pflume"
+  SCALA_2_11_PROFILES="-Pkafka-0-8"
 else
   PUBLISH_SCALA_2_10=1
 fi
@@ -171,8 +172,7 @@ fi
 DEST_DIR_NAME="$SPARK_PACKAGE_VERSION"
 
 git clean -d -f -x
-rm .gitignore
-rm -rf .git
+rm -f .gitignore
 cd ..
 
 if [[ "$1" == "package" ]]; then
@@ -187,7 +187,7 @@ if [[ "$1" == "package" ]]; then
     rm -r spark-$SPARK_VERSION/licenses-binary
   fi
 
-  tar cvzf spark-$SPARK_VERSION.tgz spark-$SPARK_VERSION
+  tar cvzf spark-$SPARK_VERSION.tgz --exclude spark-$SPARK_VERSION/.git spark-$SPARK_VERSION
   echo $GPG_PASSPHRASE | $GPG --passphrase-fd 0 --armour --output spark-$SPARK_VERSION.tgz.asc \
     --detach-sig spark-$SPARK_VERSION.tgz
   echo $GPG_PASSPHRASE | $GPG --passphrase-fd 0 --print-md \
@@ -199,7 +199,6 @@ if [[ "$1" == "package" ]]; then
   # Updated for each binary build
   make_binary_release() {
     NAME=$1
-    FLAGS="$MVN_EXTRA_OPTS -B $BASE_RELEASE_PROFILES $2"
     # BUILD_PACKAGE can be "withpip", "withr", or both as "withpip,withr"
     BUILD_PACKAGE=$3
     SCALA_VERSION=$4
@@ -235,7 +234,7 @@ if [[ "$1" == "package" ]]; then
 
     # Get maven home set by MVN
     MVN_HOME=`$MVN -version 2>&1 | grep 'Maven home' | awk '{print $NF}'`
-
+    
     echo "Creating distribution"
     ./dev/make-distribution.sh --name $NAME --mvn $MVN_HOME/bin/mvn --tgz \
       $PIP_FLAG $R_FLAG $FLAGS \
@@ -300,7 +299,7 @@ if [[ "$1" == "package" ]]; then
 
   declare -A BINARY_PKGS_EXTRA
   BINARY_PKGS_EXTRA["hadoop2.7"]="withpip,withr"
-
+  
   echo "Packages to build: ${!BINARY_PKGS_ARGS[@]}"
   for key in ${!BINARY_PKGS_ARGS[@]}; do
     args=${BINARY_PKGS_ARGS[$key]}
@@ -428,13 +427,13 @@ if [[ "$1" == "publish-release" ]]; then
 
   $MVN -DzincPort=$ZINC_PORT -Dmaven.repo.local=$tmp_repo -DskipTests $SCALA_2_11_PROFILES $PUBLISH_PROFILES clean install
 
-  if ! is_dry_run && [[ $PUBLISH_SCALA_2_10 = 1 ]]; then
+  if [[ $PUBLISH_SCALA_2_10 = 1 ]]; then
     ./dev/change-scala-version.sh 2.10
     $MVN -DzincPort=$((ZINC_PORT + 1)) -Dmaven.repo.local=$tmp_repo -Dscala-2.10 \
       -DskipTests $PUBLISH_PROFILES $SCALA_2_10_PROFILES clean install
   fi
 
-  if ! is_dry_run && [[ $PUBLISH_SCALA_2_12 = 1 ]]; then
+  if [[ $PUBLISH_SCALA_2_12 = 1 ]]; then
     ./dev/change-scala-version.sh 2.12
     $MVN -DzincPort=$((ZINC_PORT + 2)) -Dmaven.repo.local=$tmp_repo -Dscala-2.12 \
       -DskipTests $PUBLISH_PROFILES $SCALA_2_12_PROFILES clean install

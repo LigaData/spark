@@ -49,7 +49,7 @@ class DatasetCacheSuite extends QueryTest with SharedSQLContext with TimeLimits 
     assert(ds1.storageLevel == StorageLevel.MEMORY_AND_DISK)
     assert(ds2.storageLevel == StorageLevel.MEMORY_AND_DISK)
     // unpersist
-    ds1.unpersist(blocking = true)
+    ds1.unpersist()
     assert(ds1.storageLevel == StorageLevel.NONE)
     // non-default storage level
     ds1.persist(StorageLevel.MEMORY_ONLY_2)
@@ -71,7 +71,7 @@ class DatasetCacheSuite extends QueryTest with SharedSQLContext with TimeLimits 
       cached,
       2, 3, 4)
     // Drop the cache.
-    cached.unpersist(blocking = true)
+    cached.unpersist()
     assert(cached.storageLevel == StorageLevel.NONE, "The Dataset should not be cached.")
   }
 
@@ -88,9 +88,9 @@ class DatasetCacheSuite extends QueryTest with SharedSQLContext with TimeLimits 
     checkDataset(joined, ("2", 2))
     assertCached(joined, 2)
 
-    ds1.unpersist(blocking = true)
+    ds1.unpersist()
     assert(ds1.storageLevel == StorageLevel.NONE, "The Dataset ds1 should not be cached.")
-    ds2.unpersist(blocking = true)
+    ds2.unpersist()
     assert(ds2.storageLevel == StorageLevel.NONE, "The Dataset ds2 should not be cached.")
   }
 
@@ -105,9 +105,9 @@ class DatasetCacheSuite extends QueryTest with SharedSQLContext with TimeLimits 
       ("b", 3))
     assertCached(agged.filter(_._1 == "b"))
 
-    ds.unpersist(blocking = true)
+    ds.unpersist()
     assert(ds.storageLevel == StorageLevel.NONE, "The Dataset ds should not be cached.")
-    agged.unpersist(blocking = true)
+    agged.unpersist()
     assert(agged.storageLevel == StorageLevel.NONE, "The Dataset agged should not be cached.")
   }
 
@@ -122,13 +122,13 @@ class DatasetCacheSuite extends QueryTest with SharedSQLContext with TimeLimits 
     df.count()
     assertCached(df2)
 
-    df.unpersist(blocking = true)
+    df.unpersist()
     assert(df.storageLevel == StorageLevel.NONE)
   }
 
   test("cache UDF result correctly") {
-    val expensiveUDF = udf({x: Int => Thread.sleep(2000); x})
-    val df = spark.range(0, 2).toDF("a").repartition(1).withColumn("b", expensiveUDF($"a"))
+    val expensiveUDF = udf({x: Int => Thread.sleep(5000); x})
+    val df = spark.range(0, 10).toDF("a").withColumn("b", expensiveUDF($"a"))
     val df2 = df.agg(sum(df("b")))
 
     df.cache()
@@ -136,11 +136,11 @@ class DatasetCacheSuite extends QueryTest with SharedSQLContext with TimeLimits 
     assertCached(df2)
 
     // udf has been evaluated during caching, and thus should not be re-evaluated here
-    failAfter(2 seconds) {
+    failAfter(3 seconds) {
       df2.collect()
     }
 
-    df.unpersist(blocking = true)
+    df.unpersist()
     assert(df.storageLevel == StorageLevel.NONE)
   }
 
@@ -166,7 +166,7 @@ class DatasetCacheSuite extends QueryTest with SharedSQLContext with TimeLimits 
     df.count()
     df3.cache()
 
-    df.unpersist(blocking = true)
+    df.unpersist()
 
     // df un-cached; df2 and df3's cache plan re-compiled
     assert(df.storageLevel == StorageLevel.NONE)

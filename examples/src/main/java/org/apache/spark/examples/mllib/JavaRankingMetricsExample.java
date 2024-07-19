@@ -99,12 +99,11 @@ public class JavaRankingMetricsExample {
     // Instantiate the metrics object
     RankingMetrics<Integer> metrics = RankingMetrics.of(relevantDocs);
 
-    // Precision, NDCG and Recall at k
+    // Precision and NDCG at k
     Integer[] kVector = {1, 3, 5};
     for (Integer k : kVector) {
       System.out.format("Precision at %d = %f\n", k, metrics.precisionAt(k));
       System.out.format("NDCG at %d = %f\n", k, metrics.ndcgAt(k));
-      System.out.format("Recall at %d = %f\n", k, metrics.recallAt(k));
     }
 
     // Mean average precision

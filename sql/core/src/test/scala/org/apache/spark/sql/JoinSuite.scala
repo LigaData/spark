@@ -17,17 +17,17 @@
 
 package org.apache.spark.sql
 
-import java.util.Locale
-
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
 import scala.language.existentials
+
+import org.mockito.Mockito._
 
 import org.apache.spark.TestUtils.{assertNotSpilled, assertSpilled}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
 import org.apache.spark.sql.catalyst.expressions.{Ascending, SortOrder}
-import org.apache.spark.sql.execution.{BinaryExecNode, SortExec}
+import org.apache.spark.sql.execution.{BinaryExecNode, SortExec, SparkPlan}
 import org.apache.spark.sql.execution.joins._
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSQLContext
@@ -35,6 +35,23 @@ import org.apache.spark.sql.types.StructType
 
 class JoinSuite extends QueryTest with SharedSQLContext {
   import testImplicits._
+
+  private def attachCleanupResourceChecker(plan: SparkPlan): Unit = {
+    // SPARK-21492: Check cleanupResources are finally triggered in SortExec node for every
+    // test case
+    plan.foreachUp {
+      case s: SortExec =>
+        val sortExec = spy(s)
+        verify(sortExec, atLeastOnce).cleanupResources()
+        verify(sortExec.rowSorter, atLeastOnce).cleanupResources()
+      case _ =>
+    }
+  }
+
+  override protected def checkAnswer(df: => DataFrame, rows: Seq[Row]): Unit = {
+    attachCleanupResourceChecker(df.queryExecution.sparkPlan)
+    super.checkAnswer(df, rows)
+  }
 
   setupTestData()
 
@@ -833,7 +850,7 @@ class JoinSuite extends QueryTest with SharedSQLContext {
         case _ =>
       }
       val joinPairs = physicalJoins.zip(executedJoins)
-      val numOfJoins = sqlString.split(" ").count(_.toUpperCase(Locale.ROOT) == "JOIN")
+      val numOfJoins = sqlString.split(" ").count(_.toUpperCase == "JOIN")
       assert(joinPairs.size == numOfJoins)
 
       joinPairs.foreach {
@@ -896,6 +913,26 @@ class JoinSuite extends QueryTest with SharedSQLContext {
     }
   }
 
+  test("SPARK-27485: EnsureRequirements should not fail join with duplicate keys") {
+    withSQLConf(SQLConf.SHUFFLE_PARTITIONS.key -> "2",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1") {
+      val tbl_a = spark.range(40)
+        .select($"id" as "x", $"id" % 10 as "y")
+        .repartition(2, $"x", $"y", $"x")
+        .as("tbl_a")
+
+      val tbl_b = spark.range(20)
+        .select($"id" as "x", $"id" % 2 as "y1", $"id" % 20 as "y2")
+        .as("tbl_b")
+
+      val res = tbl_a
+        .join(tbl_b,
+          $"tbl_a.x" === $"tbl_b.x" && $"tbl_a.y" === $"tbl_b.y1" && $"tbl_a.y" === $"tbl_b.y2")
+        .select($"tbl_a.x")
+      checkAnswer(res, Row(0L) :: Row(1L) :: Nil)
+    }
+  }
+
   test("SPARK-26352: join reordering should not change the order of columns") {
     withTable("tab1", "tab2", "tab3") {
       spark.sql("select 1 as x, 100 as y").write.saveAsTable("tab1")
@@ -910,63 +947,24 @@ class JoinSuite extends QueryTest with SharedSQLContext {
     }
   }
 
-  test("NaN and -0.0 in join keys") {
-    withTempView("v1", "v2", "v3", "v4") {
-      Seq(Float.NaN -> Double.NaN, 0.0f -> 0.0, -0.0f -> -0.0).toDF("f", "d").createTempView("v1")
-      Seq(Float.NaN -> Double.NaN, 0.0f -> 0.0, -0.0f -> -0.0).toDF("f", "d").createTempView("v2")
+  test("SPARK-21492: cleanupResource without code generation") {
+    withSQLConf(
+      SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key -> "false",
+      SQLConf.SHUFFLE_PARTITIONS.key -> "1",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1") {
+      val df1 = spark.range(0, 10, 1, 2)
+      val df2 = spark.range(10).select($"id".as("b1"), (- $"id").as("b2"))
+      val res = df1.join(df2, $"id" === $"b1" && $"id" === $"b2").select($"b1", $"b2", $"id")
+      checkAnswer(res, Row(0, 0, 0))
+    }
+  }
 
-      checkAnswer(
-        sql(
-          """
-            |SELECT v1.f, v1.d, v2.f, v2.d
-            |FROM v1 JOIN v2
-            |ON v1.f = v2.f AND v1.d = v2.d
-          """.stripMargin),
-        Seq(
-          Row(Float.NaN, Double.NaN, Float.NaN, Double.NaN),
-          Row(0.0f, 0.0, 0.0f, 0.0),
-          Row(0.0f, 0.0, -0.0f, -0.0),
-          Row(-0.0f, -0.0, 0.0f, 0.0),
-          Row(-0.0f, -0.0, -0.0f, -0.0)))
-
-      // test with complicated join keys.
-      checkAnswer(
-        sql(
-          """
-            |SELECT v1.f, v1.d, v2.f, v2.d
-            |FROM v1 JOIN v2
-            |ON
-            |  array(v1.f) = array(v2.f) AND
-            |  struct(v1.d) = struct(v2.d) AND
-            |  array(struct(v1.f, v1.d)) = array(struct(v2.f, v2.d)) AND
-            |  struct(array(v1.f), array(v1.d)) = struct(array(v2.f), array(v2.d))
-          """.stripMargin),
-        Seq(
-          Row(Float.NaN, Double.NaN, Float.NaN, Double.NaN),
-          Row(0.0f, 0.0, 0.0f, 0.0),
-          Row(0.0f, 0.0, -0.0f, -0.0),
-          Row(-0.0f, -0.0, 0.0f, 0.0),
-          Row(-0.0f, -0.0, -0.0f, -0.0)))
-
-      // test with tables with complicated-type columns.
-      Seq((Array(-0.0f, 0.0f), Tuple2(-0.0d, Double.NaN), Seq(Tuple2(-0.0d, Double.NaN))))
-        .toDF("arr", "stru", "arrOfStru").createTempView("v3")
-      Seq((Array(0.0f, -0.0f), Tuple2(0.0d, 0.0/0.0), Seq(Tuple2(0.0d, 0.0/0.0))))
-        .toDF("arr", "stru", "arrOfStru").createTempView("v4")
-      checkAnswer(
-        sql(
-          """
-            |SELECT v3.arr, v3.stru, v3.arrOfStru, v4.arr, v4.stru, v4.arrOfStru
-            |FROM v3 JOIN v4
-            |ON v3.arr = v4.arr AND v3.stru = v4.stru AND v3.arrOfStru = v4.arrOfStru
-          """.stripMargin),
-        Seq(Row(
-          Seq(-0.0f, 0.0f),
-          Row(-0.0d, Double.NaN),
-          Seq(Row(-0.0d, Double.NaN)),
-          Seq(0.0f, -0.0f),
-          Row(0.0d, 0.0/0.0),
-          Seq(Row(0.0d, 0.0/0.0)))))
+  test("SPARK-29850: sort-merge-join an empty table should not memory leak") {
+    val df1 = spark.range(10).select($"id", $"id" % 3 as 'p)
+      .repartition($"id").groupBy($"id").agg(Map("p" -> "max"))
+    val df2 = spark.range(0)
+    withSQLConf(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1") {
+      assert(df2.join(df1, "id").collect().isEmpty)
     }
   }
 }

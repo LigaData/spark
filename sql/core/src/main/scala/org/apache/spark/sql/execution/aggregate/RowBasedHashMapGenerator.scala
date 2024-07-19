@@ -48,12 +48,6 @@ class RowBasedHashMapGenerator(
     val keySchema = ctx.addReferenceObj("keySchemaTerm", groupingKeySchema)
     val valueSchema = ctx.addReferenceObj("valueSchemaTerm", bufferSchema)
 
-    val numVarLenFields = groupingKeys.map(_.dataType).count {
-      case dt if UnsafeRow.isFixedLength(dt) => false
-      // TODO: consider large decimal and interval type
-      case _ => true
-    }
-
     s"""
        |  private org.apache.spark.sql.catalyst.expressions.RowBasedKeyValueBatch batch;
        |  private int[] buckets;
@@ -66,7 +60,6 @@ class RowBasedHashMapGenerator(
        |  private long emptyVOff;
        |  private int emptyVLen;
        |  private boolean isBatchFull = false;
-       |  private org.apache.spark.sql.catalyst.expressions.codegen.UnsafeRowWriter agg_rowWriter;
        |
        |
        |  public $generatedClassName(
@@ -81,9 +74,6 @@ class RowBasedHashMapGenerator(
        |    emptyVBase = emptyBuffer;
        |    emptyVOff = Platform.BYTE_ARRAY_OFFSET;
        |    emptyVLen = emptyBuffer.length;
-       |
-       |    agg_rowWriter = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeRowWriter(
-       |      ${groupingKeySchema.length}, ${numVarLenFields * 32});
        |
        |    buckets = new int[numBuckets];
        |    java.util.Arrays.fill(buckets, -1);
@@ -122,6 +112,12 @@ class RowBasedHashMapGenerator(
    *
    */
    protected def generateFindOrInsert(): String = {
+    val numVarLenFields = groupingKeys.map(_.dataType).count {
+      case dt if UnsafeRow.isFixedLength(dt) => false
+      // TODO: consider large decimal and interval type
+      case _ => true
+    }
+
     val createUnsafeRowForKey = groupingKeys.zipWithIndex.map { case (key: Buffer, ordinal: Int) =>
       key.dataType match {
         case t: DecimalType =>
@@ -134,12 +130,6 @@ class RowBasedHashMapGenerator(
       }
     }.mkString(";\n")
 
-    val resetNullBits = if (groupingKeySchema.map(_.nullable).forall(_ == false)) {
-      ""
-    } else {
-      "agg_rowWriter.zeroOutNullBytes();"
-    }
-
     s"""
        |public org.apache.spark.sql.catalyst.expressions.UnsafeRow findOrInsert(${
             groupingKeySignature}) {
@@ -150,8 +140,12 @@ class RowBasedHashMapGenerator(
        |    // Return bucket index if it's either an empty slot or already contains the key
        |    if (buckets[idx] == -1) {
        |      if (numRows < capacity && !isBatchFull) {
-       |        agg_rowWriter.reset();
-       |        $resetNullBits
+       |        // creating the unsafe for new entry
+       |        org.apache.spark.sql.catalyst.expressions.codegen.UnsafeRowWriter agg_rowWriter
+       |          = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeRowWriter(
+       |              ${groupingKeySchema.length}, ${numVarLenFields * 32});
+       |        agg_rowWriter.reset(); //TODO: investigate if reset or zeroout are actually needed
+       |        agg_rowWriter.zeroOutNullBytes();
        |        ${createUnsafeRowForKey};
        |        org.apache.spark.sql.catalyst.expressions.UnsafeRow agg_result
        |          = agg_rowWriter.getRow();

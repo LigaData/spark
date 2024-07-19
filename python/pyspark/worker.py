@@ -28,6 +28,7 @@ try:
     import resource
 except ImportError:
     has_resource_module = False
+import socket
 import traceback
 
 from pyspark.accumulators import _accumulatorRegistry
@@ -39,14 +40,12 @@ from pyspark.rdd import PythonEvalType
 from pyspark.serializers import write_with_length, write_int, read_long, read_bool, \
     write_long, read_int, SpecialLengths, UTF8Deserializer, PickleSerializer, \
     BatchedSerializer, ArrowStreamPandasSerializer
-from pyspark.sql.types import to_arrow_type, StructType
+from pyspark.sql.types import to_arrow_type
 from pyspark.util import _get_argspec, fail_on_stopiteration
 from pyspark import shuffle
 
 if sys.version >= '3':
     basestring = str
-else:
-    from itertools import imap as map  # use iterator map by default
 
 pickleSer = PickleSerializer()
 utf8_deserializer = UTF8Deserializer()
@@ -92,9 +91,8 @@ def wrap_scalar_pandas_udf(f, return_type):
     def verify_result_length(*a):
         result = f(*a)
         if not hasattr(result, "__len__"):
-            pd_type = "Pandas.DataFrame" if type(return_type) == StructType else "Pandas.Series"
             raise TypeError("Return type of the user-defined function should be "
-                            "{}, but is {}".format(pd_type, type(result)))
+                            "Pandas.Series, but is {}".format(type(result)))
         if len(result) != len(a[0]):
             raise RuntimeError("Result vector from pandas_udf was not the required length: "
                                "expected %d, got %d" % (len(a[0]), len(result)))
@@ -147,18 +145,7 @@ def wrap_grouped_agg_pandas_udf(f, return_type):
     return lambda *a: (wrapped(*a), arrow_return_type)
 
 
-def wrap_window_agg_pandas_udf(f, return_type, runner_conf, udf_index):
-    window_bound_types_str = runner_conf.get('pandas_window_bound_types')
-    window_bound_type = [t.strip().lower() for t in window_bound_types_str.split(',')][udf_index]
-    if window_bound_type == 'bounded':
-        return wrap_bounded_window_agg_pandas_udf(f, return_type)
-    elif window_bound_type == 'unbounded':
-        return wrap_unbounded_window_agg_pandas_udf(f, return_type)
-    else:
-        raise RuntimeError("Invalid window bound type: {} ".format(window_bound_type))
-
-
-def wrap_unbounded_window_agg_pandas_udf(f, return_type):
+def wrap_window_agg_pandas_udf(f, return_type):
     # This is similar to grouped_agg_pandas_udf, the only difference
     # is that window_agg_pandas_udf needs to repeat the return value
     # to match window length, where grouped_agg_pandas_udf just returns
@@ -173,41 +160,7 @@ def wrap_unbounded_window_agg_pandas_udf(f, return_type):
     return lambda *a: (wrapped(*a), arrow_return_type)
 
 
-def wrap_bounded_window_agg_pandas_udf(f, return_type):
-    arrow_return_type = to_arrow_type(return_type)
-
-    def wrapped(begin_index, end_index, *series):
-        import pandas as pd
-        result = []
-
-        # Index operation is faster on np.ndarray,
-        # So we turn the index series into np array
-        # here for performance
-        begin_array = begin_index.values
-        end_array = end_index.values
-
-        for i in range(len(begin_array)):
-            # Note: Create a slice from a series for each window is
-            #       actually pretty expensive. However, there
-            #       is no easy way to reduce cost here.
-            # Note: s.iloc[i : j] is about 30% faster than s[i: j], with
-            #       the caveat that the created slices shares the same
-            #       memory with s. Therefore, user are not allowed to
-            #       change the value of input series inside the window
-            #       function. It is rare that user needs to modify the
-            #       input series in the window function, and therefore,
-            #       it is be a reasonable restriction.
-            # Note: Calling reset_index on the slices will increase the cost
-            #       of creating slices by about 100%. Therefore, for performance
-            #       reasons we don't do it here.
-            series_slices = [s.iloc[begin_array[i]: end_array[i]] for s in series]
-            result.append(f(*series_slices))
-        return pd.Series(result)
-
-    return lambda *a: (wrapped(*a), arrow_return_type)
-
-
-def read_single_udf(pickleSer, infile, eval_type, runner_conf, udf_index):
+def read_single_udf(pickleSer, infile, eval_type, runner_conf):
     num_arg = read_int(infile)
     arg_offsets = [read_int(infile) for i in range(num_arg)]
     row_func = None
@@ -231,7 +184,7 @@ def read_single_udf(pickleSer, infile, eval_type, runner_conf, udf_index):
     elif eval_type == PythonEvalType.SQL_GROUPED_AGG_PANDAS_UDF:
         return arg_offsets, wrap_grouped_agg_pandas_udf(func, return_type)
     elif eval_type == PythonEvalType.SQL_WINDOW_AGG_PANDAS_UDF:
-        return arg_offsets, wrap_window_agg_pandas_udf(func, return_type, runner_conf, udf_index)
+        return arg_offsets, wrap_window_agg_pandas_udf(func, return_type)
     elif eval_type == PythonEvalType.SQL_BATCHED_UDF:
         return arg_offsets, wrap_udf(func, return_type)
     else:
@@ -255,14 +208,7 @@ def read_udfs(pickleSer, infile, eval_type):
 
         # NOTE: if timezone is set here, that implies respectSessionTimeZone is True
         timezone = runner_conf.get("spark.sql.session.timeZone", None)
-        safecheck = runner_conf.get("spark.sql.execution.pandas.arrowSafeTypeConversion",
-                                    "false").lower() == 'true'
-        # NOTE: this is duplicated from wrap_grouped_map_pandas_udf
-        assign_cols_by_name = runner_conf.get(
-            "spark.sql.legacy.execution.pandas.groupedMap.assignColumnsByName", "true")\
-            .lower() == "true"
-
-        ser = ArrowStreamPandasSerializer(timezone, safecheck, assign_cols_by_name)
+        ser = ArrowStreamPandasSerializer(timezone)
     else:
         ser = BatchedSerializer(PickleSerializer(), 100)
 
@@ -280,8 +226,7 @@ def read_udfs(pickleSer, infile, eval_type):
 
         # See FlatMapGroupsInPandasExec for how arg_offsets are used to
         # distinguish between grouping attributes and data attributes
-        arg_offsets, udf = read_single_udf(
-            pickleSer, infile, eval_type, runner_conf, udf_index=0)
+        arg_offsets, udf = read_single_udf(pickleSer, infile, eval_type, runner_conf)
         udfs['f'] = udf
         split_offset = arg_offsets[0] + 1
         arg0 = ["a[%d]" % o for o in arg_offsets[1: split_offset]]
@@ -293,8 +238,7 @@ def read_udfs(pickleSer, infile, eval_type):
         # In the special case of a single UDF this will return a single result rather
         # than a tuple of results; this is the format that the JVM side expects.
         for i in range(num_udfs):
-            arg_offsets, udf = read_single_udf(
-                pickleSer, infile, eval_type, runner_conf, udf_index=i)
+            arg_offsets, udf = read_single_udf(pickleSer, infile, eval_type, runner_conf)
             udfs['f%d' % i] = udf
             args = ["a[%d]" % o for o in arg_offsets]
             call_udf.append("f%d(%s)" % (i, ", ".join(args)))
@@ -317,7 +261,7 @@ def main(infile, outfile):
         version = utf8_deserializer.loads(infile)
         if version != "%d.%d" % sys.version_info[:2]:
             raise Exception(("Python in worker has different version %s than that in " +
-                             "driver %s, PySpark cannot run with different minor versions." +
+                             "driver %s, PySpark cannot run with different minor versions. " +
                              "Please check environment variables PYSPARK_PYTHON and " +
                              "PYSPARK_DRIVER_PYTHON are correctly set.") %
                             ("%d.%d" % sys.version_info[:2], version))

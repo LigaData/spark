@@ -528,7 +528,7 @@ class FilterEstimationSuite extends StatsEstimationTestBase {
       rowCount = 30,
       attributeStats = AttributeMap(Seq(attrIntLargerRange -> colStatIntLargerRange)))
     val nonLeafChild = Join(largerTable, smallerTable, LeftOuter,
-      Some(EqualTo(attrIntLargerRange, attrInt)), JoinHint.NONE)
+      Some(EqualTo(attrIntLargerRange, attrInt)))
 
     Seq(IsNull(attrIntLargerRange), IsNotNull(attrIntLargerRange)).foreach { predicate =>
       validateEstimatedStats(

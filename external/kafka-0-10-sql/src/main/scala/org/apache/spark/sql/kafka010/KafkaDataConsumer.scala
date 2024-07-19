@@ -27,7 +27,6 @@ import org.apache.kafka.common.TopicPartition
 
 import org.apache.spark.{SparkEnv, SparkException, TaskContext}
 import org.apache.spark.internal.Logging
-import org.apache.spark.kafka010.KafkaConfigUpdater
 import org.apache.spark.sql.kafka010.KafkaDataConsumer.AvailableOffsetRange
 import org.apache.spark.sql.kafka010.KafkaSourceProvider._
 import org.apache.spark.util.UninterruptibleThread
@@ -198,10 +197,7 @@ private[kafka010] case class InternalKafkaConsumer(
 
   /** Create a KafkaConsumer to fetch records for `topicPartition` */
   private def createConsumer: KafkaConsumer[Array[Byte], Array[Byte]] = {
-    val updatedKafkaParams = KafkaConfigUpdater("executor", kafkaParams.asScala.toMap)
-      .setAuthenticationConfigIfNeeded()
-      .build()
-    val c = new KafkaConsumer[Array[Byte], Array[Byte]](updatedKafkaParams)
+    val c = new KafkaConsumer[Array[Byte], Array[Byte]](kafkaParams)
     val tps = new ju.ArrayList[TopicPartition]()
     tps.add(topicPartition)
     c.assign(tps)

@@ -101,11 +101,10 @@ public abstract class WritableColumnVector extends ColumnVector {
     String message = "Cannot reserve additional contiguous bytes in the vectorized reader (" +
         (requiredCapacity >= 0 ? "requested " + requiredCapacity + " bytes" : "integer overflow") +
         "). As a workaround, you can reduce the vectorized reader batch size, or disable the " +
-        "vectorized reader, or disable " + SQLConf.BUCKETING_ENABLED().key() + " if you read " +
-        "from bucket table. For Parquet file format, refer to " +
+        "vectorized reader. For parquet file format, refer to " +
         SQLConf.PARQUET_VECTORIZED_READER_BATCH_SIZE().key() +
         " (default " + SQLConf.PARQUET_VECTORIZED_READER_BATCH_SIZE().defaultValueString() +
-        ") and " + SQLConf.PARQUET_VECTORIZED_READER_ENABLED().key() + "; for ORC file format, " +
+        ") and " + SQLConf.PARQUET_VECTORIZED_READER_ENABLED().key() + "; for orc file format, " +
         "refer to " + SQLConf.ORC_VECTORIZED_READER_BATCH_SIZE().key() +
         " (default " + SQLConf.ORC_VECTORIZED_READER_BATCH_SIZE().defaultValueString() +
         ") and " + SQLConf.ORC_VECTORIZED_READER_ENABLED().key() + ".";
@@ -312,6 +311,12 @@ public abstract class WritableColumnVector extends ColumnVector {
   public abstract void putFloats(int rowId, int count, byte[] src, int srcIndex);
 
   /**
+   * Sets values from [src[srcIndex], src[srcIndex + count * 4]) to [rowId, rowId + count)
+   * The data in src must be ieee formatted floats in little endian.
+   */
+  public abstract void putFloatsLittleEndian(int rowId, int count, byte[] src, int srcIndex);
+
+  /**
    * Sets `value` to the value at rowId.
    */
   public abstract void putDouble(int rowId, double value);
@@ -331,6 +336,12 @@ public abstract class WritableColumnVector extends ColumnVector {
    * The data in src must be ieee formatted doubles in platform native endian.
    */
   public abstract void putDoubles(int rowId, int count, byte[] src, int srcIndex);
+
+  /**
+   * Sets values from [src[srcIndex], src[srcIndex + count * 8]) to [rowId, rowId + count)
+   * The data in src must be ieee formatted doubles in little endian.
+   */
+  public abstract void putDoublesLittleEndian(int rowId, int count, byte[] src, int srcIndex);
 
   /**
    * Puts a byte array that already exists in this column.

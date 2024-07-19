@@ -291,7 +291,7 @@ struct<>
 -- !query 31 output
 org.apache.spark.sql.catalyst.parser.ParseException
 
-Cannot parse the DATE value: mar 11 2016(line 1, pos 7)
+Exception parsing DATE(line 1, pos 7)
 
 == SQL ==
 select date 'mar 11 2016'
@@ -313,7 +313,7 @@ struct<>
 -- !query 33 output
 org.apache.spark.sql.catalyst.parser.ParseException
 
-Cannot parse the TIMESTAMP value: 2016-33-11 20:54:00.000(line 1, pos 7)
+Timestamp format must be yyyy-mm-dd hh:mm:ss[.fffffffff](line 1, pos 7)
 
 == SQL ==
 select timestamp '2016-33-11 20:54:00.000'
@@ -323,9 +323,9 @@ select timestamp '2016-33-11 20:54:00.000'
 -- !query 34
 select interval 13.123456789 seconds, interval -13.123456789 second
 -- !query 34 schema
-struct<interval 13 seconds 123 milliseconds 456 microseconds:calendarinterval,interval -12 seconds -876 milliseconds -544 microseconds:calendarinterval>
+struct<interval 13 seconds 123 milliseconds 456 microseconds:calendarinterval,interval -13 seconds -123 milliseconds -456 microseconds:calendarinterval>
 -- !query 34 output
-interval 13 seconds 123 milliseconds 456 microseconds	interval -12 seconds -876 milliseconds -544 microseconds
+interval 13 seconds 123 milliseconds 456 microseconds	interval -13 seconds -123 milliseconds -456 microseconds
 
 
 -- !query 35
@@ -343,11 +343,11 @@ struct<>
 -- !query 36 output
 org.apache.spark.sql.catalyst.parser.ParseException
 
-no viable alternative at input 'interval 10 nanoseconds'(line 1, pos 19)
+No interval can be constructed(line 1, pos 16)
 
 == SQL ==
 select interval 10 nanoseconds
--------------------^^^
+----------------^^^
 
 
 -- !query 37

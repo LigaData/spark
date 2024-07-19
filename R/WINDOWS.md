@@ -2,8 +2,8 @@
 
 To build SparkR on Windows, the following steps are required
 
-1. Install R (>= 3.1) and [Rtools](http://cran.r-project.org/bin/windows/Rtools/). Make sure to
-include Rtools and R in `PATH`. Note that support for R prior to version 3.4 is deprecated as of Spark 3.0.0.
+1. Install R (>= 3.5) and [Rtools](http://cran.r-project.org/bin/windows/Rtools/). Make sure to
+include Rtools and R in `PATH`.
 
 2. Install
 [JDK8](http://www.oracle.com/technetwork/java/javase/downloads/jdk8-downloads-2133151.html) and set

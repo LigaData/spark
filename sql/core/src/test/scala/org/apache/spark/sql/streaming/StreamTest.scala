@@ -44,6 +44,7 @@ import org.apache.spark.sql.execution.streaming._
 import org.apache.spark.sql.execution.streaming.continuous.{ContinuousExecution, EpochCoordinatorRef, IncrementAndGetEpoch}
 import org.apache.spark.sql.execution.streaming.sources.MemorySinkV2
 import org.apache.spark.sql.execution.streaming.state.StateStore
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.streaming.StreamingQueryListener._
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.util.{Clock, SystemClock, Utils}
@@ -78,18 +79,15 @@ trait StreamTest extends QueryTest with SharedSQLContext with TimeLimits with Be
   implicit val defaultSignaler: Signaler = ThreadSignaler
 
   override def afterAll(): Unit = {
-    try {
-      super.afterAll()
-    } finally {
-      StateStore.stop() // stop the state store maintenance thread and unload store providers
-    }
+    super.afterAll()
+    StateStore.stop() // stop the state store maintenance thread and unload store providers
   }
 
   protected val defaultTrigger = Trigger.ProcessingTime(0)
   protected val defaultUseV2Sink = false
 
   /** How long to wait for an active stream to catch up when checking a result. */
-  val streamingTimeout = 10.seconds
+  val streamingTimeout = 60.seconds
 
   /** A trait for actions that can be performed while testing a streaming DataFrame. */
   trait StreamAction
@@ -687,14 +685,8 @@ trait StreamTest extends QueryTest with SharedSQLContext with TimeLimits with Be
             def findSourceIndex(plan: LogicalPlan): Option[Int] = {
               plan
                 .collect {
-                  // v1 source
                   case r: StreamingExecutionRelation => r.source
-                  // v2 source
-                  case r: StreamingDataSourceV2Relation => r.stream
-                  // We can add data to memory stream before starting it. Then the input plan has
-                  // not been processed by the streaming engine and contains `StreamingRelationV2`.
-                  case r: StreamingRelationV2 if r.sourceName == "memory" =>
-                    r.table.asInstanceOf[MemoryStreamTable].stream
+                  case r: StreamingDataSourceV2Relation => r.reader
                 }
                 .zipWithIndex
                 .find(_._1 == source)

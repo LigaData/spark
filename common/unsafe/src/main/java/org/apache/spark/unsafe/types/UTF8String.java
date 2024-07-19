@@ -340,8 +340,17 @@ public final class UTF8String implements Comparable<UTF8String>, Externalizable,
     // to the -ith element before the end of the sequence. If a start index i is 0, it
     // refers to the first element.
     int len = numChars();
+    // `len + pos` does not overflow as `len >= 0`.
     int start = (pos > 0) ? pos -1 : ((pos < 0) ? len + pos : 0);
-    int end = (length == Integer.MAX_VALUE) ? len : start + length;
+
+    int end;
+    if ((long) start + length > Integer.MAX_VALUE) {
+      end = Integer.MAX_VALUE;
+    } else if ((long) start + length < Integer.MIN_VALUE) {
+      end = Integer.MIN_VALUE;
+    } else {
+      end = start + length;
+    }
     return substring(start, end);
   }
 
@@ -958,12 +967,6 @@ public final class UTF8String implements Comparable<UTF8String>, Externalizable,
   }
 
   public UTF8String[] split(UTF8String pattern, int limit) {
-    // Java String's split method supports "ignore empty string" behavior when the limit is 0
-    // whereas other languages do not. To avoid this java specific behavior, we fall back to
-    // -1 when the limit is 0.
-    if (limit == 0) {
-      limit = -1;
-    }
     String[] splits = toString().split(pattern.toString(), limit);
     UTF8String[] res = new UTF8String[splits.length];
     for (int i = 0; i < res.length; i++) {

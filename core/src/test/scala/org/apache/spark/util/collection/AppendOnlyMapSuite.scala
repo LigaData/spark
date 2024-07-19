@@ -113,7 +113,7 @@ class AppendOnlyMapSuite extends SparkFunSuite {
     assert(map.size === 100)
     for (i <- 1 to 100) {
       val res = map.changeValue("" + i, (hadValue, oldValue) => {
-        assert(hadValue)
+        assert(hadValue === true)
         assert(oldValue === "" + i)
         oldValue + "!"
       })
@@ -136,7 +136,7 @@ class AppendOnlyMapSuite extends SparkFunSuite {
     })
     assert(map.size === 401)
     map.changeValue(null, (hadValue, oldValue) => {
-      assert(hadValue)
+      assert(hadValue === true)
       assert(oldValue === "null!")
       "null!!"
     })

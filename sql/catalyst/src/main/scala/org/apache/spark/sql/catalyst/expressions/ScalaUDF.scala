@@ -21,7 +21,8 @@ import org.apache.spark.SparkException
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow, ScalaReflection}
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.expressions.codegen.Block._
-import org.apache.spark.sql.types.{AbstractDataType, DataType}
+import org.apache.spark.sql.types.{AbstractDataType, AnyDataType, DataType, UserDefinedType}
+import org.apache.spark.util.Utils
 
 /**
  * User-defined function.
@@ -31,10 +32,9 @@ import org.apache.spark.sql.types.{AbstractDataType, DataType}
  *                  null. Use boxed type or [[Option]] if you wanna do the null-handling yourself.
  * @param dataType  Return type of function.
  * @param children  The input expressions of this UDF.
- * @param inputPrimitives The analyzer should be aware of Scala primitive types so as to make the
- *                        UDF return null if there is any null input value of these types. On the
- *                        other hand, Java UDFs can only have boxed types, thus this parameter will
- *                        always be all false.
+ * @param inputsNullSafe Whether the inputs are of non-primitive types or not nullable. Null values
+ *                       of Scala primitive types will be converted to the type's default value and
+ *                       lead to wrong results, thus need special handling before calling the UDF.
  * @param inputTypes  The expected input types of this UDF, used to perform type coercion. If we do
  *                    not want to perform coercion, simply use "Nil". Note that it would've been
  *                    better to use Option of Seq[DataType] so we can use "None" as the case for no
@@ -48,12 +48,24 @@ case class ScalaUDF(
     function: AnyRef,
     dataType: DataType,
     children: Seq[Expression],
-    inputPrimitives: Seq[Boolean],
-    inputTypes: Seq[AbstractDataType] = Nil,
+    inputsNullSafe: Seq[Boolean],
+    inputTypes: Seq[DataType] = Nil,
     udfName: Option[String] = None,
     nullable: Boolean = true,
     udfDeterministic: Boolean = true)
-  extends Expression with NonSQLExpression with UserDefinedExpression {
+  extends Expression with ImplicitCastInputTypes with NonSQLExpression with UserDefinedExpression {
+
+  // The constructor for SPARK 2.1 and 2.2
+  def this(
+      function: AnyRef,
+      dataType: DataType,
+      children: Seq[Expression],
+      inputTypes: Seq[DataType],
+      udfName: Option[String]) = {
+    this(
+      function, dataType, children, ScalaReflection.getParameterTypeNullability(function),
+      inputTypes, udfName, nullable = true, udfDeterministic = true)
+  }
 
   override lazy val deterministic: Boolean = udfDeterministic && children.forall(_.deterministic)
 
@@ -1041,7 +1053,7 @@ case class ScalaUDF(
   private[this] val resultConverter = CatalystTypeConverters.createToCatalystConverter(dataType)
 
   lazy val udfErrorMessage = {
-    val funcCls = function.getClass.getSimpleName
+    val funcCls = Utils.getSimpleName(function.getClass)
     val inputTypes = children.map(_.dataType.catalogString).mkString(", ")
     val outputType = dataType.catalogString
     s"Failed to execute user defined function($funcCls: ($inputTypes) => $outputType)"

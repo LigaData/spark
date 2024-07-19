@@ -216,6 +216,8 @@ class LocalLDAModel private[spark] (
     }.toArray
   }
 
+  override protected def formatVersion = "1.0"
+
   /**
    * Random seed for cluster initialization.
    */
@@ -336,7 +338,7 @@ class LocalLDAModel private[spark] (
 
         docBound
       }.sum()
-    ElogbetaBc.destroy()
+    ElogbetaBc.destroy(blocking = false)
 
     // Bound component for prob(topic-term distributions):
     //   E[log p(beta | eta) - log q(beta | lambda)]
@@ -832,6 +834,8 @@ class DistributedLDAModel private[clustering] (
 
   // TODO:
   // override def topicDistributions(documents: RDD[(Long, Vector)]): RDD[(Long, Vector)] = ???
+
+  override protected def formatVersion = "1.0"
 
   @Since("1.5.0")
   override def save(sc: SparkContext, path: String): Unit = {

@@ -27,7 +27,6 @@ import org.apache.commons.io.FileUtils
 
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.History._
 import org.apache.spark.status.KVUtils._
 import org.apache.spark.util.{Clock, Utils}
 import org.apache.spark.util.kvstore.KVStore
@@ -50,6 +49,8 @@ private class HistoryServerDiskManager(
     path: File,
     listing: KVStore,
     clock: Clock) extends Logging {
+
+  import config._
 
   private val appStoreDir = new File(path, "apps")
   if (!appStoreDir.isDirectory() && !appStoreDir.mkdir()) {
@@ -75,12 +76,27 @@ private class HistoryServerDiskManager(
 
     // Go through the recorded store directories and remove any that may have been removed by
     // external code.
-    val orphans = listing.view(classOf[ApplicationStoreInfo]).asScala.filter { info =>
-      !new File(info.path).exists()
-    }.toSeq
+    val (existences, orphans) = listing
+      .view(classOf[ApplicationStoreInfo])
+      .asScala
+      .toSeq
+      .partition { info =>
+        new File(info.path).exists()
+      }
 
     orphans.foreach { info =>
       listing.delete(info.getClass(), info.path)
+    }
+
+    // Reading level db would trigger table file compaction, then it may cause size of level db
+    // directory changed. When service restarts, "currentUsage" is calculated from real directory
+    // size. Update "ApplicationStoreInfo.size" to ensure "currentUsage" equals
+    // sum of "ApplicationStoreInfo.size".
+    existences.foreach { info =>
+      val fileSize = sizeOf(new File(info.path))
+      if (fileSize != info.size) {
+        listing.write(info.copy(size = fileSize))
+      }
     }
 
     logInfo("Initialized disk manager: " +
@@ -233,7 +249,7 @@ private class HistoryServerDiskManager(
     }
   }
 
-  private def appStorePath(appId: String, attemptId: Option[String]): File = {
+  private[history] def appStorePath(appId: String, attemptId: Option[String]): File = {
     val fileName = appId + attemptId.map("_" + _).getOrElse("") + ".ldb"
     new File(appStoreDir, fileName)
   }

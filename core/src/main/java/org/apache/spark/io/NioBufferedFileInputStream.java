@@ -27,7 +27,7 @@ import java.nio.file.StandardOpenOption;
  * to read a file to avoid extra copy of data between Java and
  * native memory which happens when using {@link java.io.BufferedInputStream}.
  * Unfortunately, this is not something already available in JDK,
- * {@code sun.nio.ch.ChannelInputStream} supports reading a file using nio,
+ * {@link sun.nio.ch.ChannelInputStream} supports reading a file using nio,
  * but does not support buffering.
  */
 public final class NioBufferedFileInputStream extends InputStream {
@@ -60,10 +60,10 @@ public final class NioBufferedFileInputStream extends InputStream {
       while (nRead == 0) {
         nRead = fileChannel.read(byteBuffer);
       }
+      byteBuffer.flip();
       if (nRead < 0) {
         return false;
       }
-      byteBuffer.flip();
     }
     return true;
   }
@@ -130,7 +130,6 @@ public final class NioBufferedFileInputStream extends InputStream {
     StorageUtils.dispose(byteBuffer);
   }
 
-  @SuppressWarnings("deprecation")
   @Override
   protected void finalize() throws IOException {
     close();

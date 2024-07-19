@@ -509,6 +509,22 @@ class DataFrameAggregateSuite extends QueryTest with SharedSQLContext {
     )
   }
 
+  test("SPARK-31500: collect_set() of BinaryType returns duplicate elements") {
+    val bytesTest1 = "test1".getBytes
+    val bytesTest2 = "test2".getBytes
+    val df = Seq(bytesTest1, bytesTest1, bytesTest2).toDF("a")
+    checkAnswer(df.select(size(collect_set($"a"))), Row(2) :: Nil)
+
+    val a = "aa".getBytes
+    val b = "bb".getBytes
+    val c = "cc".getBytes
+    val d = "dd".getBytes
+    val df1 = Seq((a, b), (a, b), (c, d))
+      .toDF("x", "y")
+      .select(struct($"x", $"y").as("a"))
+    checkAnswer(df1.select(size(collect_set($"a"))), Row(2) :: Nil)
+  }
+
   test("collect_set functions cannot have maps") {
     val df = Seq((1, 3, 0), (2, 3, 0), (3, 4, 1))
       .toDF("a", "x", "y")
@@ -669,19 +685,23 @@ class DataFrameAggregateSuite extends QueryTest with SharedSQLContext {
     }
   }
 
-  testWithWholeStageCodegenOnAndOff("SPARK-22951: dropDuplicates on empty dataFrames " +
-    "should produce correct aggregate") { _ =>
-    // explicit global aggregations
-    val emptyAgg = Map.empty[String, String]
-    checkAnswer(spark.emptyDataFrame.agg(emptyAgg), Seq(Row()))
-    checkAnswer(spark.emptyDataFrame.groupBy().agg(emptyAgg), Seq(Row()))
-    checkAnswer(spark.emptyDataFrame.groupBy().agg(count("*")), Seq(Row(0)))
-    checkAnswer(spark.emptyDataFrame.dropDuplicates().agg(emptyAgg), Seq(Row()))
-    checkAnswer(spark.emptyDataFrame.dropDuplicates().groupBy().agg(emptyAgg), Seq(Row()))
-    checkAnswer(spark.emptyDataFrame.dropDuplicates().groupBy().agg(count("*")), Seq(Row(0)))
+  Seq(true, false).foreach { codegen =>
+    test("SPARK-22951: dropDuplicates on empty dataFrames should produce correct aggregate " +
+      s"results when codegen is enabled: $codegen") {
+      withSQLConf((SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, codegen.toString)) {
+        // explicit global aggregations
+        val emptyAgg = Map.empty[String, String]
+        checkAnswer(spark.emptyDataFrame.agg(emptyAgg), Seq(Row()))
+        checkAnswer(spark.emptyDataFrame.groupBy().agg(emptyAgg), Seq(Row()))
+        checkAnswer(spark.emptyDataFrame.groupBy().agg(count("*")), Seq(Row(0)))
+        checkAnswer(spark.emptyDataFrame.dropDuplicates().agg(emptyAgg), Seq(Row()))
+        checkAnswer(spark.emptyDataFrame.dropDuplicates().groupBy().agg(emptyAgg), Seq(Row()))
+        checkAnswer(spark.emptyDataFrame.dropDuplicates().groupBy().agg(count("*")), Seq(Row(0)))
 
-    // global aggregation is converted to grouping aggregation:
-    assert(spark.emptyDataFrame.dropDuplicates().count() == 0)
+        // global aggregation is converted to grouping aggregation:
+        assert(spark.emptyDataFrame.dropDuplicates().count() == 0)
+      }
+    }
   }
 
   test("SPARK-21896: Window functions inside aggregate functions") {
@@ -724,52 +744,10 @@ class DataFrameAggregateSuite extends QueryTest with SharedSQLContext {
         "type: GroupBy]"))
   }
 
-  test("SPARK-26021: NaN and -0.0 in grouping expressions") {
-    import java.lang.Float.floatToRawIntBits
-    import java.lang.Double.doubleToRawLongBits
-
-    // 0.0/0.0 and NaN are different values.
-    assert(floatToRawIntBits(0.0f/0.0f) != floatToRawIntBits(Float.NaN))
-    assert(doubleToRawLongBits(0.0/0.0) != doubleToRawLongBits(Double.NaN))
-
-    checkAnswer(
-      Seq(0.0f, -0.0f, 0.0f/0.0f, Float.NaN).toDF("f").groupBy("f").count(),
-      Row(0.0f, 2) :: Row(Float.NaN, 2) :: Nil)
-    checkAnswer(
-      Seq(0.0d, -0.0d, 0.0d/0.0d, Double.NaN).toDF("d").groupBy("d").count(),
-      Row(0.0d, 2) :: Row(Double.NaN, 2) :: Nil)
-
-    // test with complicated type grouping expressions
-    checkAnswer(
-      Seq(0.0f, -0.0f, 0.0f/0.0f, Float.NaN).toDF("f")
-        .groupBy(array("f"), struct("f")).count(),
-      Row(Seq(0.0f), Row(0.0f), 2) ::
-        Row(Seq(Float.NaN), Row(Float.NaN), 2) :: Nil)
-    checkAnswer(
-      Seq(0.0d, -0.0d, 0.0d/0.0d, Double.NaN).toDF("d")
-        .groupBy(array("d"), struct("d")).count(),
-      Row(Seq(0.0d), Row(0.0d), 2) ::
-        Row(Seq(Double.NaN), Row(Double.NaN), 2) :: Nil)
-
-    checkAnswer(
-      Seq(0.0f, -0.0f, 0.0f/0.0f, Float.NaN).toDF("f")
-        .groupBy(array(struct("f")), struct(array("f"))).count(),
-      Row(Seq(Row(0.0f)), Row(Seq(0.0f)), 2) ::
-        Row(Seq(Row(Float.NaN)), Row(Seq(Float.NaN)), 2) :: Nil)
-    checkAnswer(
-      Seq(0.0d, -0.0d, 0.0d/0.0d, Double.NaN).toDF("d")
-        .groupBy(array(struct("d")), struct(array("d"))).count(),
-      Row(Seq(Row(0.0d)), Row(Seq(0.0d)), 2) ::
-        Row(Seq(Row(Double.NaN)), Row(Seq(Double.NaN)), 2) :: Nil)
-
-    // test with complicated type grouping columns
-    val df = Seq(
-      (Array(-0.0f, 0.0f), Tuple2(-0.0d, Double.NaN), Seq(Tuple2(-0.0d, Double.NaN))),
-      (Array(0.0f, -0.0f), Tuple2(0.0d, Double.NaN), Seq(Tuple2(0.0d, 0.0/0.0)))
-    ).toDF("arr", "stru", "arrOfStru")
-    checkAnswer(
-      df.groupBy("arr", "stru", "arrOfStru").count(),
-      Row(Seq(0.0f, 0.0f), Row(0.0d, Double.NaN), Seq(Row(0.0d, Double.NaN)), 2)
-    )
+  test("SPARK-32344: Unevaluable's set to FIRST/LAST ignoreNullsExpr in distinct aggregates") {
+    val queryTemplate = (agg: String) =>
+      s"SELECT $agg(DISTINCT v) FROM (SELECT v FROM VALUES 1, 2, 3 t(v) ORDER BY v)"
+    checkAnswer(sql(queryTemplate("FIRST")), Row(1))
+    checkAnswer(sql(queryTemplate("LAST")), Row(3))
   }
 }

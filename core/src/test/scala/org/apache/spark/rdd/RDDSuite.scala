@@ -29,7 +29,6 @@ import org.apache.hadoop.mapred.{FileSplit, TextInputFormat}
 
 import org.apache.spark._
 import org.apache.spark.api.java.{JavaRDD, JavaSparkContext}
-import org.apache.spark.internal.config.RDD_PARALLEL_LISTING_THRESHOLD
 import org.apache.spark.rdd.RDDSuiteUtils._
 import org.apache.spark.util.{ThreadUtils, Utils}
 
@@ -96,18 +95,6 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext {
     assert(!deserial.toString().isEmpty())
   }
 
-  test("distinct with known partitioner preserves partitioning") {
-    val rdd = sc.parallelize(1.to(100), 10).map(x => (x % 10, x % 10)).sortByKey()
-    val initialPartitioner = rdd.partitioner
-    val distinctRdd = rdd.distinct()
-    val resultingPartitioner = distinctRdd.partitioner
-    assert(initialPartitioner === resultingPartitioner)
-    val distinctRddDifferent = rdd.distinct(5)
-    val distinctRddDifferentPartitioner = distinctRddDifferent.partitioner
-    assert(initialPartitioner != distinctRddDifferentPartitioner)
-    assert(distinctRdd.collect().sorted === distinctRddDifferent.collect().sorted)
-  }
-
   test("countApproxDistinct") {
 
     def error(est: Long, size: Long): Double = math.abs(est - size) / size.toDouble
@@ -137,12 +124,12 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext {
 
     assert(serialUnion.asInstanceOf[UnionRDD[Int]].isPartitionListingParallel === false)
 
-    sc.conf.set(RDD_PARALLEL_LISTING_THRESHOLD, 1)
+    sc.conf.set("spark.rdd.parallelListingThreshold", "1")
     val parallelUnion = sc.union(nums1, nums2)
     val actual = parallelUnion.collect().toList
-    sc.conf.remove(RDD_PARALLEL_LISTING_THRESHOLD.key)
+    sc.conf.remove("spark.rdd.parallelListingThreshold")
 
-    assert(parallelUnion.asInstanceOf[UnionRDD[Int]].isPartitionListingParallel)
+    assert(parallelUnion.asInstanceOf[UnionRDD[Int]].isPartitionListingParallel === true)
     assert(expected === actual)
   }
 
@@ -445,7 +432,7 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext {
     val splits = coalesced1.glom().collect().map(_.toList).toList
     assert(splits.length === 3, "Supposed to coalesce to 3 but got " + splits.length)
 
-    assert(splits.forall(_.length >= 1), "Some partitions were empty")
+    assert(splits.forall(_.length >= 1) === true, "Some partitions were empty")
 
     // If we try to coalesce into more partitions than the original RDD, it should just
     // keep the original number of partitions.
@@ -472,7 +459,7 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext {
     val splits = coalesced1.glom().collect().map(_.toList).toList
     assert(splits.length === 3, "Supposed to coalesce to 3 but got " + splits.length)
 
-    assert(splits.forall(_.length >= 1), "Some partitions were empty")
+    assert(splits.forall(_.length >= 1) === true, "Some partitions were empty")
 
     // If we try to coalesce into more partitions than the original RDD, it should just
     // keep the original number of partitions.

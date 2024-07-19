@@ -20,14 +20,12 @@ package org.apache.spark.sql.sources
 import java.io.File
 import java.net.URI
 
-import scala.util.Random
-
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.catalog.BucketSpec
 import org.apache.spark.sql.catalyst.expressions
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical.HashPartitioning
-import org.apache.spark.sql.execution.{DataSourceScanExec, SortExec}
+import org.apache.spark.sql.execution.{DataSourceScanExec, FileSourceScanExec, SortExec, SparkPlan}
 import org.apache.spark.sql.execution.datasources.BucketingUtils
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.execution.joins.SortMergeJoinExec
@@ -41,7 +39,7 @@ import org.apache.spark.util.collection.BitSet
 class BucketedReadWithoutHiveSupportSuite extends BucketedReadSuite with SharedSQLContext {
   protected override def beforeAll(): Unit = {
     super.beforeAll()
-    assume(spark.sparkContext.conf.get(CATALOG_IMPLEMENTATION) == "in-memory")
+    assert(spark.sparkContext.conf.get(CATALOG_IMPLEMENTATION) == "in-memory")
   }
 }
 
@@ -49,13 +47,11 @@ class BucketedReadWithoutHiveSupportSuite extends BucketedReadSuite with SharedS
 abstract class BucketedReadSuite extends QueryTest with SQLTestUtils {
   import testImplicits._
 
-  private val maxI = 5
-  private val maxJ = 13
-  private lazy val df = (0 until 50).map(i => (i % maxI, i % maxJ, i.toString)).toDF("i", "j", "k")
+  private lazy val df = (0 until 50).map(i => (i % 5, i % 13, i.toString)).toDF("i", "j", "k")
   private lazy val nullDF = (for {
     i <- 0 to 50
     s <- Seq(null, "a", "b", "c", "d", "e", "f", null, "g")
-  } yield (i % maxI, s, i % maxJ)).toDF("i", "j", "k")
+  } yield (i % 5, s, i % 13)).toDF("i", "j", "k")
 
   // number of buckets that doesn't yield empty buckets when bucketing on column j on df/nullDF
   // empty buckets before filtering might hide bugs in pruning logic
@@ -70,23 +66,30 @@ abstract class BucketedReadSuite extends QueryTest with SQLTestUtils {
         .bucketBy(8, "j", "k")
         .saveAsTable("bucketed_table")
 
-      val bucketValue = Random.nextInt(maxI)
-      val table = spark.table("bucketed_table").filter($"i" === bucketValue)
-      val query = table.queryExecution
-      val output = query.analyzed.output
-      val rdd = query.toRdd
+      for (i <- 0 until 5) {
+        val table = spark.table("bucketed_table").filter($"i" === i)
+        val query = table.queryExecution
+        val output = query.analyzed.output
+        val rdd = query.toRdd
 
-      assert(rdd.partitions.length == 8)
+        assert(rdd.partitions.length == 8)
 
-      val attrs = table.select("j", "k").queryExecution.analyzed.output
-      val checkBucketId = rdd.mapPartitionsWithIndex((index, rows) => {
-        val getBucketId = UnsafeProjection.create(
-          HashPartitioning(attrs, 8).partitionIdExpression :: Nil,
-          output)
-        rows.map(row => getBucketId(row).getInt(0) -> index)
-      })
-      checkBucketId.collect().foreach(r => assert(r._1 == r._2))
+        val attrs = table.select("j", "k").queryExecution.analyzed.output
+        val checkBucketId = rdd.mapPartitionsWithIndex((index, rows) => {
+          val getBucketId = UnsafeProjection.create(
+            HashPartitioning(attrs, 8).partitionIdExpression :: Nil,
+            output)
+          rows.map(row => getBucketId(row).getInt(0) -> index)
+        })
+        checkBucketId.collect().foreach(r => assert(r._1 == r._2))
+      }
     }
+  }
+
+  private def getFileScan(plan: SparkPlan): FileSourceScanExec = {
+    val fileScan = plan.collect { case f: FileSourceScanExec => f }
+    assert(fileScan.nonEmpty, plan)
+    fileScan.head
   }
 
   // To verify if the bucket pruning works, this function checks two conditions:
@@ -108,8 +111,7 @@ abstract class BucketedReadSuite extends QueryTest with SQLTestUtils {
 
       // Filter could hide the bug in bucket pruning. Thus, skipping all the filters
       val plan = bucketedDataFrame.filter(filterCondition).queryExecution.executedPlan
-      val rdd = plan.find(_.isInstanceOf[DataSourceScanExec])
-      assert(rdd.isDefined, plan)
+      val fileScan = getFileScan(plan)
 
       // if nothing should be pruned, skip the pruning test
       if (bucketValues.nonEmpty) {
@@ -117,7 +119,7 @@ abstract class BucketedReadSuite extends QueryTest with SQLTestUtils {
         bucketValues.foreach { value =>
           matchedBuckets.set(BucketingUtils.getBucketIdFromValue(bucketColumn, numBuckets, value))
         }
-        val invalidBuckets = rdd.get.execute().mapPartitionsWithIndex { case (index, iter) =>
+        val invalidBuckets = fileScan.execute().mapPartitionsWithIndex { case (index, iter) =>
           // return indexes of partitions that should have been pruned and are not empty
           if (!matchedBuckets.get(index % numBuckets) && iter.nonEmpty) {
             Iterator(index)
@@ -148,36 +150,36 @@ abstract class BucketedReadSuite extends QueryTest with SQLTestUtils {
         .bucketBy(numBuckets, "j")
         .saveAsTable("bucketed_table")
 
-      val bucketValue = Random.nextInt(maxJ)
-      // Case 1: EqualTo
-      checkPrunedAnswers(
-        bucketSpec,
-        bucketValues = bucketValue :: Nil,
-        filterCondition = $"j" === bucketValue,
-        df)
+      for (j <- 0 until 13) {
+        // Case 1: EqualTo
+        checkPrunedAnswers(
+          bucketSpec,
+          bucketValues = j :: Nil,
+          filterCondition = $"j" === j,
+          df)
 
-      // Case 2: EqualNullSafe
-      checkPrunedAnswers(
-        bucketSpec,
-        bucketValues = bucketValue :: Nil,
-        filterCondition = $"j" <=> bucketValue,
-        df)
+        // Case 2: EqualNullSafe
+        checkPrunedAnswers(
+          bucketSpec,
+          bucketValues = j :: Nil,
+          filterCondition = $"j" <=> j,
+          df)
 
-      // Case 3: In
-      checkPrunedAnswers(
-        bucketSpec,
-        bucketValues = Seq(bucketValue, bucketValue + 1, bucketValue + 2, bucketValue + 3),
-        filterCondition = $"j".isin(bucketValue, bucketValue + 1, bucketValue + 2, bucketValue + 3),
-        df)
+        // Case 3: In
+        checkPrunedAnswers(
+          bucketSpec,
+          bucketValues = Seq(j, j + 1, j + 2, j + 3),
+          filterCondition = $"j".isin(j, j + 1, j + 2, j + 3),
+          df)
 
-      // Case 4: InSet
-      val inSetExpr = expressions.InSet($"j".expr,
-        Set(bucketValue, bucketValue + 1, bucketValue + 2, bucketValue + 3).map(lit(_).expr))
-      checkPrunedAnswers(
-        bucketSpec,
-        bucketValues = Seq(bucketValue, bucketValue + 1, bucketValue + 2, bucketValue + 3),
-        filterCondition = Column(inSetExpr),
-        df)
+        // Case 4: InSet
+        val inSetExpr = expressions.InSet($"j".expr, Set(j, j + 1, j + 2, j + 3).map(lit(_).expr))
+        checkPrunedAnswers(
+          bucketSpec,
+          bucketValues = Seq(j, j + 1, j + 2, j + 3),
+          filterCondition = Column(inSetExpr),
+          df)
+      }
     }
   }
 
@@ -191,12 +193,13 @@ abstract class BucketedReadSuite extends QueryTest with SQLTestUtils {
         .bucketBy(numBuckets, "j")
         .saveAsTable("bucketed_table")
 
-      val bucketValue = Random.nextInt(maxJ)
-      checkPrunedAnswers(
-        bucketSpec,
-        bucketValues = bucketValue :: Nil,
-        filterCondition = $"j" === bucketValue,
-        df)
+      for (j <- 0 until 13) {
+        checkPrunedAnswers(
+          bucketSpec,
+          bucketValues = j :: Nil,
+          filterCondition = $"j" === j,
+          df)
+      }
     }
   }
 
@@ -238,39 +241,40 @@ abstract class BucketedReadSuite extends QueryTest with SQLTestUtils {
         .bucketBy(numBuckets, "j")
         .saveAsTable("bucketed_table")
 
-      val bucketValue = Random.nextInt(maxJ)
-      checkPrunedAnswers(
-        bucketSpec,
-        bucketValues = bucketValue :: Nil,
-        filterCondition = $"j" === bucketValue && $"k" > $"j",
-        df)
+      for (j <- 0 until 13) {
+        checkPrunedAnswers(
+          bucketSpec,
+          bucketValues = j :: Nil,
+          filterCondition = $"j" === j && $"k" > $"j",
+          df)
 
-      checkPrunedAnswers(
-        bucketSpec,
-        bucketValues = bucketValue :: Nil,
-        filterCondition = $"j" === bucketValue && $"i" > bucketValue % 5,
-        df)
+        checkPrunedAnswers(
+          bucketSpec,
+          bucketValues = j :: Nil,
+          filterCondition = $"j" === j && $"i" > j % 5,
+          df)
 
-      // check multiple bucket values OR condition
-      checkPrunedAnswers(
-        bucketSpec,
-        bucketValues = Seq(bucketValue, bucketValue + 1),
-        filterCondition = $"j" === bucketValue || $"j" === (bucketValue + 1),
-        df)
+        // check multiple bucket values OR condition
+        checkPrunedAnswers(
+          bucketSpec,
+          bucketValues = Seq(j, j + 1),
+          filterCondition = $"j" === j || $"j" === (j + 1),
+          df)
 
-      // check bucket value and none bucket value OR condition
-      checkPrunedAnswers(
-        bucketSpec,
-        bucketValues = Nil,
-        filterCondition = $"j" === bucketValue || $"i" === 0,
-        df)
+        // check bucket value and none bucket value OR condition
+        checkPrunedAnswers(
+          bucketSpec,
+          bucketValues = Nil,
+          filterCondition = $"j" === j || $"i" === 0,
+          df)
 
-      // check AND condition in complex expression
-      checkPrunedAnswers(
-        bucketSpec,
-        bucketValues = Seq(bucketValue),
-        filterCondition = ($"i" === 0 || $"k" > $"j") && $"j" === bucketValue,
-        df)
+        // check AND condition in complex expression
+        checkPrunedAnswers(
+          bucketSpec,
+          bucketValues = Seq(j),
+          filterCondition = ($"i" === 0 || $"k" > $"j") && $"j" === j,
+          df)
+      }
     }
   }
 
@@ -286,10 +290,9 @@ abstract class BucketedReadSuite extends QueryTest with SQLTestUtils {
 
       val bucketedDataFrame = spark.table("bucketed_table").select("i", "j", "k")
       val plan = bucketedDataFrame.queryExecution.executedPlan
-      val rdd = plan.find(_.isInstanceOf[DataSourceScanExec])
-      assert(rdd.isDefined, plan)
+      val fileScan = getFileScan(plan)
 
-      val emptyBuckets = rdd.get.execute().mapPartitionsWithIndex { case (index, iter) =>
+      val emptyBuckets = fileScan.execute().mapPartitionsWithIndex { case (index, iter) =>
         // return indexes of empty partitions
         if (iter.isEmpty) {
           Iterator(index)
@@ -729,10 +732,63 @@ abstract class BucketedReadSuite extends QueryTest with SQLTestUtils {
     withTable("bucketed_table") {
       df1.write.format("parquet").bucketBy(8, "i").saveAsTable("bucketed_table")
 
-      checkAnswer(spark.table("bucketed_table").select("j"), df1.select("j"))
+      val scanDF = spark.table("bucketed_table").select("j")
+      assert(!getFileScan(scanDF.queryExecution.executedPlan).bucketedScan)
+      checkAnswer(scanDF, df1.select("j"))
 
-      checkAnswer(spark.table("bucketed_table").groupBy("j").agg(max("k")),
-        df1.groupBy("j").agg(max("k")))
+      val aggDF = spark.table("bucketed_table").groupBy("j").agg(max("k"))
+      assert(!getFileScan(aggDF.queryExecution.executedPlan).bucketedScan)
+      checkAnswer(aggDF, df1.groupBy("j").agg(max("k")))
     }
   }
+
+  //  A test with a partition where the number of files in the partition is
+  //  large. tests for the condition where the serialization of such a task may result in a stack
+  //  overflow if the files list is stored in a recursive data structure
+  //  This test is ignored because it takes long to run (~3 min)
+  ignore("SPARK-27100 stack overflow: read data with large partitions") {
+    val nCount = 20000
+    // reshuffle data so that many small files are created
+    val nShufflePartitions = 10000
+    // and with one table partition, should result in 10000 files in one partition
+    val nPartitions = 1
+    val nBuckets = 2
+    val dfPartitioned = (0 until nCount)
+      .map(i => (i % nPartitions, i % nBuckets, i.toString)).toDF("i", "j", "k")
+
+    // non-bucketed tables. This part succeeds without the fix for SPARK-27100
+    try {
+      withTable("non_bucketed_table") {
+        dfPartitioned.repartition(nShufflePartitions)
+          .write
+          .format("parquet")
+          .partitionBy("i")
+          .saveAsTable("non_bucketed_table")
+
+        val table = spark.table("non_bucketed_table")
+        val nValues = table.select("j", "k").count()
+        assert(nValues == nCount)
+      }
+    } catch {
+      case e: Exception => fail("Failed due to exception: " + e)
+    }
+    // bucketed tables. This fails without the fix for SPARK-27100
+    try {
+      withTable("bucketed_table") {
+        dfPartitioned.repartition(nShufflePartitions)
+          .write
+          .format("parquet")
+          .partitionBy("i")
+          .bucketBy(nBuckets, "j")
+          .saveAsTable("bucketed_table")
+
+        val table = spark.table("bucketed_table")
+        val nValues = table.select("j", "k").count()
+        assert(nValues == nCount)
+      }
+    } catch {
+      case e: Exception => fail("Failed due to exception: " + e)
+    }
+  }
+
 }

@@ -318,7 +318,7 @@ class SQLContext(object):
 
     @since(1.6)
     def dropTempTable(self, tableName):
-        """ Remove the temp table from catalog.
+        """ Remove the temporary table from catalog.
 
         >>> sqlContext.registerDataFrameAsTable(df, "table1")
         >>> sqlContext.dropTempTable("table1")
@@ -485,8 +485,7 @@ class HiveContext(SQLContext):
             "SparkSession.builder.enableHiveSupport().getOrCreate() instead.",
             DeprecationWarning)
         if jhiveContext is None:
-            sparkContext._conf.set("spark.sql.catalogImplementation", "hive")
-            sparkSession = SparkSession.builder._sparkContext(sparkContext).getOrCreate()
+            sparkSession = SparkSession.builder.enableHiveSupport().getOrCreate()
         else:
             sparkSession = SparkSession(sparkContext, jhiveContext.sparkSession())
         SQLContext.__init__(self, sparkContext, sparkSession, jhiveContext)
@@ -537,8 +536,10 @@ def _test():
     globs['df'] = rdd.toDF()
     jsonStrings = [
         '{"field1": 1, "field2": "row1", "field3":{"field4":11}}',
-        '{"field1" : 2, "field3":{"field4":22, "field5": [10, 11]},"field6":[{"field7": "row2"}]}',
-        '{"field1" : null, "field2": "row3", "field3":{"field4":33, "field5": []}}'
+        '{"field1" : 2, "field3":{"field4":22, "field5": [10, 11]},'
+        '"field6":[{"field7": "row2"}]}',
+        '{"field1" : null, "field2": "row3", '
+        '"field3":{"field4":33, "field5": []}}'
     ]
     globs['jsonStrings'] = jsonStrings
     globs['json'] = sc.parallelize(jsonStrings)

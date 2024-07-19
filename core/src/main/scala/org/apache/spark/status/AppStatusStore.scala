@@ -20,9 +20,8 @@ package org.apache.spark.status
 import java.util.{List => JList}
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.HashMap
 
-import org.apache.spark.{JobExecutionStatus, SparkConf}
+import org.apache.spark.{JobExecutionStatus, SparkConf, SparkException}
 import org.apache.spark.status.api.v1
 import org.apache.spark.ui.scope._
 import org.apache.spark.util.{Distribution, Utils}
@@ -36,7 +35,14 @@ private[spark] class AppStatusStore(
     val listener: Option[AppStatusListener] = None) {
 
   def applicationInfo(): v1.ApplicationInfo = {
-    store.view(classOf[ApplicationInfoWrapper]).max(1).iterator().next().info
+    try {
+      // The ApplicationInfo may not be available when Spark is starting up.
+      store.view(classOf[ApplicationInfoWrapper]).max(1).iterator().next().info
+    } catch {
+      case _: NoSuchElementException =>
+        throw new NoSuchElementException("Failed to get the application information. " +
+          "If you are starting up Spark, please wait a while until it's ready.")
+    }
   }
 
   def environmentInfo(): v1.ApplicationEnvironmentInfo = {
@@ -55,13 +61,6 @@ private[spark] class AppStatusStore(
 
   def job(jobId: Int): v1.JobData = {
     store.read(classOf[JobDataWrapper], jobId).info
-  }
-
-  // Returns job data and associated SQL execution ID of certain Job ID.
-  // If there is no related SQL execution, the SQL execution ID part will be None.
-  def jobWithAssociatedSql(jobId: Int): (v1.JobData, Option[Long]) = {
-    val data = store.read(classOf[JobDataWrapper], jobId)
-    (data.info, data.sqlExecutionId)
   }
 
   def executorList(activeOnly: Boolean): Seq[v1.ExecutorSummary] = {
@@ -120,12 +119,10 @@ private[spark] class AppStatusStore(
     }
   }
 
-  def stageAttempt(stageId: Int, stageAttemptId: Int,
-      details: Boolean = false): (v1.StageData, Seq[Int]) = {
+  def stageAttempt(stageId: Int, stageAttemptId: Int, details: Boolean = false): v1.StageData = {
     val stageKey = Array(stageId, stageAttemptId)
-    val stageDataWrapper = store.read(classOf[StageDataWrapper], stageKey)
-    val stage = if (details) stageWithDetails(stageDataWrapper.info) else stageDataWrapper.info
-    (stage, stageDataWrapper.jobIds.toSeq)
+    val stage = store.read(classOf[StageDataWrapper], stageKey).info
+    if (details) stageWithDetails(stage) else stage
   }
 
   def taskCount(stageId: Int, stageAttemptId: Int): Long = {
@@ -135,6 +132,12 @@ private[spark] class AppStatusStore(
   def localitySummary(stageId: Int, stageAttemptId: Int): Map[String, Long] = {
     store.read(classOf[StageDataWrapper], Array(stageId, stageAttemptId)).locality
   }
+
+  // SPARK-26119: we only want to consider successful tasks when calculating the metrics summary,
+  // but currently this is very expensive when using a disk store. So we only trigger the slower
+  // code path when we know we have all data in memory. The following method checks whether all
+  // the data will be in memory.
+  private def isInMemoryStore: Boolean = store.isInstanceOf[InMemoryStore] || listener.isDefined
 
   /**
    * Calculates a summary of the task metrics for the given stage attempt, returning the
@@ -156,7 +159,8 @@ private[spark] class AppStatusStore(
     // cheaper for disk stores (avoids deserialization).
     val count = {
       Utils.tryWithResource(
-        if (store.isInstanceOf[InMemoryStore]) {
+        if (isInMemoryStore) {
+          // For Live UI, we should count the tasks with status "SUCCESS" only.
           store.view(classOf[TaskDataWrapper])
             .parent(stageKey)
             .index(TaskIndexNames.STATUS)
@@ -245,7 +249,7 @@ private[spark] class AppStatusStore(
     // and failed tasks differently (would be tricky). Also would require changing the disk store
     // version (to invalidate old stores).
     def scanTasks(index: String)(fn: TaskDataWrapper => Long): IndexedSeq[Double] = {
-      if (store.isInstanceOf[InMemoryStore]) {
+      if (isInMemoryStore) {
         val quantileTasks = store.view(classOf[TaskDataWrapper])
           .parent(stageKey)
           .index(index)
@@ -387,9 +391,8 @@ private[spark] class AppStatusStore(
 
   def taskList(stageId: Int, stageAttemptId: Int, maxTasks: Int): Seq[v1.TaskData] = {
     val stageKey = Array(stageId, stageAttemptId)
-    val taskDataWrapperIter = store.view(classOf[TaskDataWrapper]).index("stage")
-      .first(stageKey).last(stageKey).reverse().max(maxTasks).asScala
-    constructTaskDataList(taskDataWrapperIter).reverse
+    store.view(classOf[TaskDataWrapper]).index("stage").first(stageKey).last(stageKey).reverse()
+      .max(maxTasks).asScala.map(_.toApi).toSeq.reverse
   }
 
   def taskList(
@@ -428,8 +431,7 @@ private[spark] class AppStatusStore(
     }
 
     val ordered = if (ascending) indexed else indexed.reverse()
-    val taskDataWrapperIter = ordered.skip(offset).max(length).asScala
-    constructTaskDataList(taskDataWrapperIter)
+    ordered.skip(offset).max(length).asScala.map(_.toApi).toSeq
   }
 
   def executorSummary(stageId: Int, attemptId: Int): Map[String, v1.ExecutorStageSummary] = {
@@ -528,36 +530,19 @@ private[spark] class AppStatusStore(
   }
 
   def appSummary(): AppSummary = {
-    store.read(classOf[AppSummary], classOf[AppSummary].getName())
+    try {
+      store.read(classOf[AppSummary], classOf[AppSummary].getName())
+    } catch {
+      case _: NoSuchElementException =>
+        throw new NoSuchElementException("Failed to get the application summary. " +
+          "If you are starting up Spark, please wait a while until it's ready.")
+    }
   }
 
   def close(): Unit = {
     store.close()
   }
 
-  def constructTaskDataList(taskDataWrapperIter: Iterable[TaskDataWrapper]): Seq[v1.TaskData] = {
-    val executorIdToLogs = new HashMap[String, Map[String, String]]()
-    taskDataWrapperIter.map { taskDataWrapper =>
-      val taskDataOld: v1.TaskData = taskDataWrapper.toApi
-      val executorLogs = executorIdToLogs.getOrElseUpdate(taskDataOld.executorId, {
-        try {
-          executorSummary(taskDataOld.executorId).executorLogs
-        } catch {
-          case e: NoSuchElementException =>
-            Map.empty
-        }
-      })
-
-      new v1.TaskData(taskDataOld.taskId, taskDataOld.index,
-        taskDataOld.attempt, taskDataOld.launchTime, taskDataOld.resultFetchStart,
-        taskDataOld.duration, taskDataOld.executorId, taskDataOld.host, taskDataOld.status,
-        taskDataOld.taskLocality, taskDataOld.speculative, taskDataOld.accumulatorUpdates,
-        taskDataOld.errorMessage, taskDataOld.taskMetrics,
-        executorLogs,
-        AppStatusUtils.schedulerDelay(taskDataOld),
-        AppStatusUtils.gettingResultTime(taskDataOld))
-    }.toSeq
-  }
 }
 
 private[spark] object AppStatusStore {
@@ -567,11 +552,10 @@ private[spark] object AppStatusStore {
   /**
    * Create an in-memory store for a live application.
    */
-  def createLiveStore(
-      conf: SparkConf,
-      appStatusSource: Option[AppStatusSource] = None): AppStatusStore = {
+  def createLiveStore(conf: SparkConf): AppStatusStore = {
     val store = new ElementTrackingStore(new InMemoryStore(), conf)
-    val listener = new AppStatusListener(store, conf, true, appStatusSource)
+    val listener = new AppStatusListener(store, conf, true)
     new AppStatusStore(store, listener = Some(listener))
   }
+
 }

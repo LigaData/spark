@@ -17,31 +17,14 @@
 
 package org.apache.spark.sql.catalyst.util
 
-import org.apache.spark.{SparkConf, SparkFunSuite}
-import org.apache.spark.serializer.JavaSerializer
+import org.apache.spark.SparkFunSuite
 
 class CaseInsensitiveMapSuite extends SparkFunSuite {
-  private def shouldBeSerializable(m: Map[String, String]): Unit = {
-    new JavaSerializer(new SparkConf()).newInstance().serialize(m)
-  }
-
-  test("Keys are case insensitive") {
-    val m = CaseInsensitiveMap(Map("a" -> "b", "foO" -> "bar"))
-    assert(m("FOO") == "bar")
-    assert(m("fOo") == "bar")
-    assert(m("A") == "b")
-    shouldBeSerializable(m)
-  }
-
-  test("CaseInsensitiveMap should be serializable after '-' operator") {
-    val m = CaseInsensitiveMap(Map("a" -> "b", "foo" -> "bar")) - "a"
-    assert(m == Map("foo" -> "bar"))
-    shouldBeSerializable(m)
-  }
-
-  test("CaseInsensitiveMap should be serializable after '+' operator") {
-    val m = CaseInsensitiveMap(Map("a" -> "b", "foo" -> "bar")) + ("x" -> "y")
-    assert(m == Map("a" -> "b", "foo" -> "bar", "x" -> "y"))
-    shouldBeSerializable(m)
+  test("SPARK-32377: CaseInsensitiveMap should be deterministic for addition") {
+     var m = CaseInsensitiveMap(Map.empty[String, String])
+     Seq(("paTh", "1"), ("PATH", "2"), ("Path", "3"), ("patH", "4"), ("path", "5")).foreach { kv =>
+       m = (m + kv).asInstanceOf[CaseInsensitiveMap[String]]
+       assert(m.get("path").contains(kv._2))
+     }
   }
 }

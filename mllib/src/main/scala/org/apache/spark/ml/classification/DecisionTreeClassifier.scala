@@ -22,11 +22,10 @@ import org.json4s.{DefaultFormats, JObject}
 import org.json4s.JsonDSL._
 
 import org.apache.spark.annotation.Since
-import org.apache.spark.ml.feature.{Instance, LabeledPoint}
+import org.apache.spark.ml.feature.LabeledPoint
 import org.apache.spark.ml.linalg.{DenseVector, SparseVector, Vector, Vectors}
 import org.apache.spark.ml.param.ParamMap
 import org.apache.spark.ml.tree._
-import org.apache.spark.ml.tree.{DecisionTreeModel, Node, TreeClassifierParams}
 import org.apache.spark.ml.tree.DecisionTreeModelReadWrite._
 import org.apache.spark.ml.tree.impl.RandomForest
 import org.apache.spark.ml.util._
@@ -34,9 +33,8 @@ import org.apache.spark.ml.util.Instrumentation.instrumented
 import org.apache.spark.mllib.tree.configuration.{Algo => OldAlgo, Strategy => OldStrategy}
 import org.apache.spark.mllib.tree.model.{DecisionTreeModel => OldDecisionTreeModel}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{Dataset, Row}
-import org.apache.spark.sql.functions.{col, lit}
-import org.apache.spark.sql.types.DoubleType
+import org.apache.spark.sql.Dataset
+
 
 /**
  * Decision tree learning algorithm (http://en.wikipedia.org/wiki/Decision_tree_learning)
@@ -57,30 +55,27 @@ class DecisionTreeClassifier @Since("1.4.0") (
 
   /** @group setParam */
   @Since("1.4.0")
-  def setMaxDepth(value: Int): this.type = set(maxDepth, value)
+  override def setMaxDepth(value: Int): this.type = set(maxDepth, value)
 
   /** @group setParam */
   @Since("1.4.0")
-  def setMaxBins(value: Int): this.type = set(maxBins, value)
+  override def setMaxBins(value: Int): this.type = set(maxBins, value)
 
   /** @group setParam */
   @Since("1.4.0")
-  def setMinInstancesPerNode(value: Int): this.type = set(minInstancesPerNode, value)
+  override def setMinInstancesPerNode(value: Int): this.type = set(minInstancesPerNode, value)
 
   /** @group setParam */
-  @Since("3.0.0")
-  def setMinWeightFractionPerNode(value: Double): this.type = set(minWeightFractionPerNode, value)
-
   @Since("1.4.0")
-  def setMinInfoGain(value: Double): this.type = set(minInfoGain, value)
+  override def setMinInfoGain(value: Double): this.type = set(minInfoGain, value)
 
   /** @group expertSetParam */
   @Since("1.4.0")
-  def setMaxMemoryInMB(value: Int): this.type = set(maxMemoryInMB, value)
+  override def setMaxMemoryInMB(value: Int): this.type = set(maxMemoryInMB, value)
 
   /** @group expertSetParam */
   @Since("1.4.0")
-  def setCacheNodeIds(value: Boolean): this.type = set(cacheNodeIds, value)
+  override def setCacheNodeIds(value: Boolean): this.type = set(cacheNodeIds, value)
 
   /**
    * Specifies how often to checkpoint the cached node IDs.
@@ -92,25 +87,15 @@ class DecisionTreeClassifier @Since("1.4.0") (
    * @group setParam
    */
   @Since("1.4.0")
-  def setCheckpointInterval(value: Int): this.type = set(checkpointInterval, value)
+  override def setCheckpointInterval(value: Int): this.type = set(checkpointInterval, value)
 
   /** @group setParam */
   @Since("1.4.0")
-  def setImpurity(value: String): this.type = set(impurity, value)
+  override def setImpurity(value: String): this.type = set(impurity, value)
 
   /** @group setParam */
   @Since("1.6.0")
-  def setSeed(value: Long): this.type = set(seed, value)
-
-  /**
-   * Sets the value of param [[weightCol]].
-   * If this is not set or empty, we treat all instance weights as 1.0.
-   * Default is not set, so all instances have weight one.
-   *
-   * @group setParam
-   */
-  @Since("3.0.0")
-  def setWeightCol(value: String): this.type = set(weightCol, value)
+  override def setSeed(value: Long): this.type = set(seed, value)
 
   override protected def train(
       dataset: Dataset[_]): DecisionTreeClassificationModel = instrumented { instr =>
@@ -119,27 +104,21 @@ class DecisionTreeClassifier @Since("1.4.0") (
     val categoricalFeatures: Map[Int, Int] =
       MetadataUtils.getCategoricalFeatures(dataset.schema($(featuresCol)))
     val numClasses: Int = getNumClasses(dataset)
+    instr.logNumClasses(numClasses)
 
     if (isDefined(thresholds)) {
       require($(thresholds).length == numClasses, this.getClass.getSimpleName +
         ".train() called with non-matching numClasses and thresholds.length." +
         s" numClasses=$numClasses, but thresholds has length ${$(thresholds).length}")
     }
-    validateNumClasses(numClasses)
-    val w = if (!isDefined(weightCol) || $(weightCol).isEmpty) lit(1.0) else col($(weightCol))
-    val instances =
-      dataset.select(col($(labelCol)).cast(DoubleType), w, col($(featuresCol))).rdd.map {
-        case Row(label: Double, weight: Double, features: Vector) =>
-          validateLabel(label, numClasses)
-          Instance(label, weight, features)
-      }
+
+    val oldDataset: RDD[LabeledPoint] = extractLabeledPoints(dataset, numClasses)
     val strategy = getOldStrategy(categoricalFeatures, numClasses)
-    instr.logNumClasses(numClasses)
-    instr.logParams(this, labelCol, featuresCol, predictionCol, rawPredictionCol,
-      probabilityCol, maxDepth, maxBins, minInstancesPerNode, minInfoGain, maxMemoryInMB,
+
+    instr.logParams(this, maxDepth, maxBins, minInstancesPerNode, minInfoGain, maxMemoryInMB,
       cacheNodeIds, checkpointInterval, impurity, seed)
 
-    val trees = RandomForest.run(instances, strategy, numTrees = 1, featureSubsetStrategy = "all",
+    val trees = RandomForest.run(oldDataset, strategy, numTrees = 1, featureSubsetStrategy = "all",
       seed = $(seed), instr = Some(instr), parentUID = Some(uid))
 
     trees.head.asInstanceOf[DecisionTreeClassificationModel]
@@ -148,13 +127,13 @@ class DecisionTreeClassifier @Since("1.4.0") (
   /** (private[ml]) Train a decision tree on an RDD */
   private[ml] def train(data: RDD[LabeledPoint],
       oldStrategy: OldStrategy): DecisionTreeClassificationModel = instrumented { instr =>
-    val instances = data.map(_.toInstance)
     instr.logPipelineStage(this)
-    instr.logDataset(instances)
+    instr.logDataset(data)
     instr.logParams(this, maxDepth, maxBins, minInstancesPerNode, minInfoGain, maxMemoryInMB,
       cacheNodeIds, checkpointInterval, impurity, seed)
-    val trees = RandomForest.run(instances, oldStrategy, numTrees = 1,
-      featureSubsetStrategy = "all", seed = 0L, instr = Some(instr), parentUID = Some(uid))
+
+    val trees = RandomForest.run(data, oldStrategy, numTrees = 1, featureSubsetStrategy = "all",
+      seed = 0L, instr = Some(instr), parentUID = Some(uid))
 
     trees.head.asInstanceOf[DecisionTreeClassificationModel]
   }
@@ -200,7 +179,6 @@ class DecisionTreeClassificationModel private[ml] (
 
   /**
    * Construct a decision tree classification model.
-   *
    * @param rootNode  Root node of tree, with other nodes attached.
    */
   private[ml] def this(rootNode: Node, numFeatures: Int, numClasses: Int) =

@@ -36,6 +36,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.sql.functions.udf
 import org.apache.spark.sql.types.{IntegerType, StructType}
+import org.apache.spark.storage.StorageLevel
 
 
 /**
@@ -85,8 +86,7 @@ class GaussianMixtureModel private[ml] (
     @Since("2.0.0") override val uid: String,
     @Since("2.0.0") val weights: Array[Double],
     @Since("2.0.0") val gaussians: Array[MultivariateGaussian])
-  extends Model[GaussianMixtureModel] with GaussianMixtureParams with MLWritable
-  with HasTrainingSummary[GaussianMixtureSummary] {
+  extends Model[GaussianMixtureModel] with GaussianMixtureParams with MLWritable {
 
   /** @group setParam */
   @Since("2.1.0")
@@ -121,14 +121,12 @@ class GaussianMixtureModel private[ml] (
     validateAndTransformSchema(schema)
   }
 
-  @Since("3.0.0")
-  def predict(features: Vector): Int = {
+  private[clustering] def predict(features: Vector): Int = {
     val r = predictProbability(features)
     r.argmax
   }
 
-  @Since("3.0.0")
-  def predictProbability(features: Vector): Vector = {
+  private[clustering] def predictProbability(features: Vector): Vector = {
     val probs: Array[Double] =
       GaussianMixtureModel.computeProbabilities(features.asBreeze.toDenseVector, gaussians, weights)
     Vectors.dense(probs)
@@ -163,13 +161,28 @@ class GaussianMixtureModel private[ml] (
   @Since("2.0.0")
   override def write: MLWriter = new GaussianMixtureModel.GaussianMixtureModelWriter(this)
 
+  private var trainingSummary: Option[GaussianMixtureSummary] = None
+
+  private[clustering] def setSummary(summary: Option[GaussianMixtureSummary]): this.type = {
+    this.trainingSummary = summary
+    this
+  }
+
   /**
-   * Gets summary of model on training set. An exception is
-   * thrown if `hasSummary` is false.
+   * Return true if there exists summary of model.
    */
   @Since("2.0.0")
-  override def summary: GaussianMixtureSummary = super.summary
+  def hasSummary: Boolean = trainingSummary.nonEmpty
 
+  /**
+   * Gets summary of model on training set. An exception is
+   * thrown if `trainingSummary == None`.
+   */
+  @Since("2.0.0")
+  def summary: GaussianMixtureSummary = trainingSummary.getOrElse {
+    throw new RuntimeException(
+      s"No training summary available for the ${this.getClass.getSimpleName}")
+  }
 }
 
 @Since("2.0.0")
@@ -330,10 +343,15 @@ class GaussianMixture @Since("2.0.0") (
     val sc = dataset.sparkSession.sparkContext
     val numClusters = $(k)
 
+    val handlePersistence = dataset.storageLevel == StorageLevel.NONE
     val instances = dataset
       .select(DatasetUtils.columnToVector(dataset, getFeaturesCol)).rdd.map {
       case Row(features: Vector) => features
-    }.cache()
+    }
+
+    if (handlePersistence) {
+      instances.persist(StorageLevel.MEMORY_AND_DISK)
+    }
 
     // Extract the number of features.
     val numFeatures = instances.first().size
@@ -371,8 +389,8 @@ class GaussianMixture @Since("2.0.0") (
           case (aggregator1, aggregator2) => aggregator1.merge(aggregator2)
         })
 
-      bcWeights.destroy()
-      bcGaussians.destroy()
+      bcWeights.destroy(blocking = false)
+      bcGaussians.destroy(blocking = false)
 
       if (iter == 0) {
         val numSamples = sums.count
@@ -410,8 +428,10 @@ class GaussianMixture @Since("2.0.0") (
       logLikelihood = sums.logLikelihood  // this is the freshly computed log-likelihood
       iter += 1
     }
+    if (handlePersistence) {
+      instances.unpersist()
+    }
 
-    instances.unpersist()
     val gaussianDists = gaussians.map { case (mean, covVec) =>
       val cov = GaussianMixture.unpackUpperTriangularMatrix(numFeatures, covVec.values)
       new MultivariateGaussian(mean, cov)

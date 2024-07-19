@@ -75,14 +75,6 @@ class Word2VecSuite extends MLTest with DefaultReadWriteTest {
   test("getVectors") {
     val sentence = "a b " * 100 + "a c " * 10
     val doc = sc.parallelize(Seq(sentence, sentence)).map(line => line.split(" "))
-
-    val codes = Map(
-      "a" -> Array(-0.2811822295188904, -0.6356269121170044, -0.3020961284637451),
-      "b" -> Array(1.0309048891067505, -1.29472815990448, 0.22276712954044342),
-      "c" -> Array(-0.08456747233867645, 0.5137411952018738, 0.11731560528278351)
-    )
-    val expectedVectors = codes.toSeq.sortBy(_._1).map { case (w, v) => Vectors.dense(v) }
-
     val docDF = doc.zip(doc).toDF("text", "alsotext")
 
     val model = new Word2Vec()
@@ -130,14 +122,14 @@ class Word2VecSuite extends MLTest with DefaultReadWriteTest {
     expected.foreach {
       case (expectedSynonym, expectedSimilarity) =>
         assert(findSynonymsResult.contains(expectedSynonym))
-        assert(expectedSimilarity ~== findSynonymsResult(expectedSynonym) absTol 1E-5)
+        assert(expectedSimilarity ~== findSynonymsResult.get(expectedSynonym).get absTol 1E-5)
     }
 
     val findSynonymsArrayResult = model.findSynonymsArray("a", 2).toMap
     findSynonymsResult.foreach {
       case (expectedSynonym, expectedSimilarity) =>
         assert(findSynonymsArrayResult.contains(expectedSynonym))
-        assert(expectedSimilarity ~== findSynonymsArrayResult(expectedSynonym) absTol 1E-5)
+        assert(expectedSimilarity ~== findSynonymsArrayResult.get(expectedSynonym).get absTol 1E-5)
     }
   }
 

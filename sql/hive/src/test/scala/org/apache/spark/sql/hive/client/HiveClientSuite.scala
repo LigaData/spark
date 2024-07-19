@@ -32,7 +32,7 @@ import org.apache.spark.sql.types.{BooleanType, IntegerType, LongType, StructTyp
 
 // TODO: Refactor this to `HivePartitionFilteringSuite`
 class HiveClientSuite(version: String)
-    extends HiveVersionSuite(version) with BeforeAndAfterAll {
+  extends HiveVersionSuite(version) with BeforeAndAfterAll {
 
   private val tryDirectSqlKey = HiveConf.ConfVars.METASTORE_TRY_DIRECT_SQL.varname
 
@@ -86,7 +86,7 @@ class HiveClientSuite(version: String)
 
   private def attr(name: String): Attribute = {
     client.getTable("default", "test").partitionSchema.fields
-        .find(field => field.name.equals(name)) match {
+      .find(field => field.name.equals(name)) match {
       case Some(field) => AttributeReference(field.name, field.dataType)()
       case None =>
         fail(s"Illegal name of partition attribute: $name")
@@ -251,7 +251,7 @@ class HiveClientSuite(version: String)
     val day1 = (20170101 to 20170101, 2 to 4, Seq("aa", "ab", "ba", "bb"))
     val day2 = (20170102 to 20170102, 0 to 1, Seq("aa", "ab", "ba", "bb"))
     testMetastorePartitionFiltering((attr("ds") === 20170101 && attr("h") >= 2) ||
-        (attr("ds") === 20170102 && attr("h") < 2), day1 :: day2 :: Nil)
+      (attr("ds") === 20170102 && attr("h") < 2), day1 :: day2 :: Nil)
   }
 
   test("getPartitionsByFilter: (ds=20170101 and h>=2) or (ds=20170102 and h<(1+1))") {
@@ -259,15 +259,15 @@ class HiveClientSuite(version: String)
     // Day 2 should include all hours because we can't build a filter for h<(7+1)
     val day2 = (20170102 to 20170102, 0 to 4, Seq("aa", "ab", "ba", "bb"))
     testMetastorePartitionFiltering((attr("ds") === 20170101 && attr("h") >= 2) ||
-        (attr("ds") === 20170102 && attr("h") < (Literal(1) + 1)), day1 :: day2 :: Nil)
+      (attr("ds") === 20170102 && attr("h") < (Literal(1) + 1)), day1 :: day2 :: Nil)
   }
 
   test("getPartitionsByFilter: " +
-      "chunk in ('ab', 'ba') and ((ds=20170101 and h>=2) or (ds=20170102 and h<2))") {
+    "chunk in ('ab', 'ba') and ((ds=20170101 and h>=2) or (ds=20170102 and h<2))") {
     val day1 = (20170101 to 20170101, 2 to 4, Seq("ab", "ba"))
     val day2 = (20170102 to 20170102, 0 to 1, Seq("ab", "ba"))
     testMetastorePartitionFiltering(attr("chunk").in("ab", "ba") &&
-        ((attr("ds") === 20170101 && attr("h") >= 2) || (attr("ds") === 20170102 && attr("h") < 2)),
+      ((attr("ds") === 20170101 && attr("h") >= 2) || (attr("ds") === 20170102 && attr("h") < 2)),
       day1 :: day2 :: Nil)
   }
 
@@ -276,10 +276,10 @@ class HiveClientSuite(version: String)
   }
 
   private def testMetastorePartitionFiltering(
-      filterExpr: Expression,
-      expectedDs: Seq[Int],
-      expectedH: Seq[Int],
-      expectedChunks: Seq[String]): Unit = {
+                                               filterExpr: Expression,
+                                               expectedDs: Seq[Int],
+                                               expectedH: Seq[Int],
+                                               expectedChunks: Seq[String]): Unit = {
     testMetastorePartitionFiltering(
       filterExpr,
       (expectedDs, expectedH, expectedChunks) :: Nil,
@@ -287,11 +287,11 @@ class HiveClientSuite(version: String)
   }
 
   private def testMetastorePartitionFiltering(
-      filterExpr: Expression,
-      expectedDs: Seq[Int],
-      expectedH: Seq[Int],
-      expectedChunks: Seq[String],
-      transform: Expression => Expression): Unit = {
+                                               filterExpr: Expression,
+                                               expectedDs: Seq[Int],
+                                               expectedH: Seq[Int],
+                                               expectedChunks: Seq[String],
+                                               transform: Expression => Expression): Unit = {
     testMetastorePartitionFiltering(
       filterExpr,
       (expectedDs, expectedH, expectedChunks) :: Nil,
@@ -299,15 +299,15 @@ class HiveClientSuite(version: String)
   }
 
   private def testMetastorePartitionFiltering(
-      filterExpr: Expression,
-      expectedPartitionCubes: Seq[(Seq[Int], Seq[Int], Seq[String])]): Unit = {
+                                               filterExpr: Expression,
+                                               expectedPartitionCubes: Seq[(Seq[Int], Seq[Int], Seq[String])]): Unit = {
     testMetastorePartitionFiltering(filterExpr, expectedPartitionCubes, identity)
   }
 
   private def testMetastorePartitionFiltering(
-      filterExpr: Expression,
-      expectedPartitionCubes: Seq[(Seq[Int], Seq[Int], Seq[String])],
-      transform: Expression => Expression): Unit = {
+                                               filterExpr: Expression,
+                                               expectedPartitionCubes: Seq[(Seq[Int], Seq[Int], Seq[String])],
+                                               transform: Expression => Expression): Unit = {
     val filteredPartitions = client.getPartitionsByFilter(client.getTable("default", "test"),
       Seq(
         transform(filterExpr)

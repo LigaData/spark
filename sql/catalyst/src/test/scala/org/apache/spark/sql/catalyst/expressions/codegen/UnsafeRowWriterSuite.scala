@@ -49,4 +49,5 @@ class UnsafeRowWriterSuite extends SparkFunSuite {
     // The two rows should be the equal
     assert(res1 == res2)
   }
+
 }
