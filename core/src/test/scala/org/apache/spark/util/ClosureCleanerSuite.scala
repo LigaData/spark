@@ -149,6 +149,7 @@ class ClosureCleanerSuite extends SparkFunSuite {
       val n2 = 222
       val s2 = "bbb"
       val d2 = 2.0d
+
       def getData: Int => (Int, Int, String, String, Double, Double) = _ => (n1, n2, s1, s2, d1, d2)
     }
     withSpark(new SparkContext("local", "test")) { sc =>

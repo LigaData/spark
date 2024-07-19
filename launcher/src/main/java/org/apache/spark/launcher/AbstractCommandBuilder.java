@@ -238,8 +238,8 @@ abstract class AbstractCommandBuilder {
     File scala212 = new File(sparkHome, "launcher/target/scala-2.12");
     File scala211 = new File(sparkHome, "launcher/target/scala-2.11");
     checkState(!scala212.isDirectory() || !scala211.isDirectory(),
-      "Presence of build for multiple Scala versions detected.\n" +
-      "Either clean one of them or set SPARK_SCALA_VERSION in your environment.");
+            "Presence of build for multiple Scala versions detected.\n" +
+                    "Either clean one of them or set SPARK_SCALA_VERSION in your environment.");
     if (scala212.isDirectory()) {
       return "2.12";
     } else {

@@ -2,6 +2,21 @@
 layout: global
 displayTitle: Spark Configuration
 title: Configuration
+license: |
+  Licensed to the Apache Software Foundation (ASF) under one or more
+  contributor license agreements.  See the NOTICE file distributed with
+  this work for additional information regarding copyright ownership.
+  The ASF licenses this file to You under the Apache License, Version 2.0
+  (the "License"); you may not use this file except in compliance with
+  the License.  You may obtain a copy of the License at
+ 
+     http://www.apache.org/licenses/LICENSE-2.0
+ 
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
 ---
 * This will become a table of contents (this text will be scraped).
 {:toc}
@@ -190,8 +205,10 @@ of the most common options to set are:
     and it is up to the application to avoid exceeding the overhead memory space
     shared with other non-JVM processes. When PySpark is run in YARN or Kubernetes, this memory
     is added to executor resource requests.
-
-    NOTE: Python memory usage may not be limited on platforms that do not support resource limiting, such as Windows.
+    <br/>
+    <em>Note:</em> This feature is dependent on Python's `resource` module; therefore, the behaviors and 
+    limitations are inherited. For instance, Windows does not support resource limiting and actual 
+    resource is not limited on MacOS.
   </td>
 </tr>
 <tr>
@@ -223,7 +240,8 @@ of the most common options to set are:
     stored on disk. This should be on a fast, local disk in your system. It can also be a
     comma-separated list of multiple directories on different disks.
 
-    NOTE: In Spark 1.0 and later this will be overridden by SPARK_LOCAL_DIRS (Standalone), MESOS_SANDBOX (Mesos) or
+    <br/>
+    <em>Note:</em> This will be overridden by SPARK_LOCAL_DIRS (Standalone), MESOS_SANDBOX (Mesos) or
     LOCAL_DIRS (YARN) environment variables set by the cluster manager.
   </td>
 </tr>
@@ -911,6 +929,21 @@ Apart from these, the following properties are also available, and may be useful
   </td>
 </tr>
 <tr>
+  <td><code>spark.ui.custom.executor.log.url</code></td>
+  <td>(none)</td>
+  <td>
+    Specifies custom spark executor log URL for supporting external log service instead of using cluster
+    managers' application log URLs in Spark UI. Spark will support some path variables via patterns
+    which can vary on cluster manager. Please check the documentation for your cluster manager to
+    see which patterns are supported, if any. <p/>
+    Please note that this configuration also replaces original log urls in event log,
+    which will be also effective when accessing the application on history server. The new log urls must be
+    permanent, otherwise you might have dead link for executor log urls.
+    <p/>
+    For now, only YARN mode supports this configuration
+  </td>
+</tr>
+<tr>
   <td><code>spark.worker.ui.retainedExecutors</code></td>
   <td>1000</td>
   <td>
@@ -968,7 +1001,7 @@ Apart from these, the following properties are also available, and may be useful
   <td>
     The maximum allowed size for a HTTP request header, in bytes unless otherwise specified.
     This setting applies for the Spark History Server too.
-  <td>
+  </td>
 </tr>
 </table>
 
@@ -2278,7 +2311,7 @@ In some cases, you may want to avoid hard-coding certain configurations in a `Sp
 instance, Spark allows you to simply create an empty conf and set spark/spark hadoop properties.
 
 {% highlight scala %}
-val conf = new SparkConf().set("spark.hadoop.abc.def","xyz")
+val conf = new SparkConf().set("spark.hadoop.abc.def", "xyz")
 val sc = new SparkContext(conf)
 {% endhighlight %}
 

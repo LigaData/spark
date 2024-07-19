@@ -76,8 +76,7 @@ object BuildCommons {
 
   val testTempDir = s"$sparkHome/target/tmp"
 
-  val javacJVMVersion = settingKey[String]("source and target JVM version for javac")
-  val scalacJVMVersion = settingKey[String]("source and target JVM version for scalac")
+  val javaVersion = settingKey[String]("source and target JVM version for javac and scalac")
 }
 
 object SparkBuild extends PomBuild {
@@ -95,15 +94,15 @@ object SparkBuild extends PomBuild {
     }
 
     Option(System.getProperty("scala.version"))
-      .filter(_.startsWith("2.12"))
+      .filter(_.startsWith("2.11"))
       .foreach { versionString =>
-        System.setProperty("scala-2.12", "true")
+        System.setProperty("scala-2.11", "true")
       }
-    if (System.getProperty("scala-2.12") == "") {
+    if (System.getProperty("scala-2.11") == "") {
       // To activate scala-2.10 profile, replace empty property value to non-empty value
       // in the same way as Maven which handles -Dname as -Dname=true before executes build process.
       // see: https://github.com/apache/maven/blob/maven-3.0.4/maven-embedder/src/main/java/org/apache/maven/cli/MavenCli.java#L1082
-      System.setProperty("scala-2.12", "true")
+      System.setProperty("scala-2.11", "true")
     }
     profiles
   }
@@ -240,23 +239,22 @@ object SparkBuild extends PomBuild {
       if (major >= 8) Seq("-Xdoclint:all", "-Xdoclint:-missing") else Seq.empty
     },
 
-    javacJVMVersion := "1.8",
-    scalacJVMVersion := "1.8",
+    javaVersion := SbtPomKeys.effectivePom.value.getProperties.get("java.version").asInstanceOf[String],
 
     javacOptions in Compile ++= Seq(
       "-encoding", "UTF-8",
-      "-source", javacJVMVersion.value
+      "-source", javaVersion.value
     ),
     // This -target and Xlint:unchecked options cannot be set in the Compile configuration scope since
     // `javadoc` doesn't play nicely with them; see https://github.com/sbt/sbt/issues/355#issuecomment-3817629
     // for additional discussion and explanation.
     javacOptions in (Compile, compile) ++= Seq(
-      "-target", javacJVMVersion.value,
+      "-target", javaVersion.value,
       "-Xlint:unchecked"
     ),
 
     scalacOptions in Compile ++= Seq(
-      s"-target:jvm-${scalacJVMVersion.value}",
+      s"-target:jvm-${javaVersion.value}",
       "-sourcepath", (baseDirectory in ThisBuild).value.getAbsolutePath  // Required for relative source links in scaladoc
     ),
 
@@ -568,10 +566,11 @@ object OldDeps {
 
 object Catalyst {
   lazy val settings = antlr4Settings ++ Seq(
-    antlr4Version in Antlr4 := "4.7",
+    antlr4Version in Antlr4 := SbtPomKeys.effectivePom.value.getProperties.get("antlr4.version").asInstanceOf[String],
     antlr4PackageName in Antlr4 := Some("org.apache.spark.sql.catalyst.parser"),
     antlr4GenListener in Antlr4 := true,
-    antlr4GenVisitor in Antlr4 := true
+    antlr4GenVisitor in Antlr4 := true,
+    antlr4TreatWarningsAsErrors in Antlr4 := true
   )
 }
 
@@ -856,10 +855,10 @@ object TestSettings {
   import BuildCommons._
 
   private val scalaBinaryVersion =
-    if (System.getProperty("scala-2.12") == "true") {
-      "2.12"
-    } else {
+    if (System.getProperty("scala-2.11") == "true") {
       "2.11"
+    } else {
+      "2.12"
     }
   lazy val settings = Seq (
     // Fork new JVMs for tests and set Java options for those

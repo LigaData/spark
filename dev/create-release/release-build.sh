@@ -84,7 +84,7 @@ GIT_REF=${GIT_REF:-master}
 
 RELEASE_STAGING_LOCATION="https://dist.apache.org/repos/dist/dev/spark"
 
-GPG="gpg -u $GPG_KEY --no-tty --batch"
+GPG="gpg -u $GPG_KEY --no-tty --batch --pinentry-mode loopback"
 NEXUS_ROOT=https://repository.apache.org/service/local/staging
 NEXUS_PROFILE=d63f592e7eac0 # Profile for Spark staging uploads
 BASE_DIR=$(pwd)
@@ -115,15 +115,19 @@ SCALA_2_10_PROFILES="-Pscala-2.10"
 SCALA_2_11_PROFILES=
 if [[ $SPARK_VERSION > "2.3" ]]; then
   BASE_PROFILES="$BASE_PROFILES -Pkubernetes"
+
   if [[ $SPARK_VERSION < "3.0." ]]; then
-    SCALA_2_11_PROFILES="-Pkafka-0-8"
+    SCALA_2_11_PROFILES="-Pkafka-0-8 -Pflume"
   fi
-else
-  PUBLISH_SCALA_2_10=1
+  else
+    PUBLISH_SCALA_2_10=1
 fi
 
 PUBLISH_SCALA_2_12=0
 SCALA_2_12_PROFILES="-Pscala-2.12"
+if [[ $SPARK_VERSION < "3.0." ]]; then
+  SCALA_2_12_PROFILES="-Pscala-2.12 -Pflume"
+fi
 if [[ $SPARK_VERSION > "2.4" ]]; then
   PUBLISH_SCALA_2_12=1
 fi
@@ -219,7 +223,7 @@ if [[ "$1" == "package" ]]; then
     cd spark-$SPARK_VERSION-bin-$NAME
 
     if [[ "$SCALA_VERSION" != "2.11" ]]; then
-      ./dev/change-scala-version.sh $SCALA_VERSION
+          ./dev/change-scala-version.sh $SCALA_VERSION
     fi
 
     export ZINC_PORT=$ZINC_PORT
@@ -290,8 +294,8 @@ if [[ "$1" == "package" ]]; then
       BINARY_PKGS_ARGS["hadoop2.6"]="-Phadoop-2.6 $HIVE_PROFILES"
     fi
     if [[ $SPARK_VERSION < "2.2." ]]; then
-      BINARY_PKGS_ARGS["hadoop2.4"]="-Phadoop-2.4 $HIVE_PROFILES"
-      BINARY_PKGS_ARGS["hadoop2.3"]="-Phadoop-2.3 $HIVE_PROFILES"
+          BINARY_PKGS_ARGS["hadoop2.4"]="-Phadoop-2.4 $HIVE_PROFILES"
+          BINARY_PKGS_ARGS["hadoop2.3"]="-Phadoop-2.3 $HIVE_PROFILES"
     fi
   fi
 
@@ -299,21 +303,22 @@ if [[ "$1" == "package" ]]; then
   BINARY_PKGS_EXTRA["hadoop2.7"]="withpip,withr"
 
   echo "Packages to build: ${!BINARY_PKGS_ARGS[@]}"
-  for key in ${!BINARY_PKGS_ARGS[@]}; do
-    args=${BINARY_PKGS_ARGS[$key]}
-    extra=${BINARY_PKGS_EXTRA[$key]}
+    for key in ${!BINARY_PKGS_ARGS[@]}; do
+      args=${BINARY_PKGS_ARGS[$key]}
+      extra=${BINARY_PKGS_EXTRA[$key]}
     if ! make_binary_release "$key" "$SCALA_2_11_PROFILES $args" "$extra" "2.11"; then
       error "Failed to build $key package. Check logs for details."
     fi
-  done
+    done
+  fi
 
   if [[ $PUBLISH_SCALA_2_12 = 1 ]]; then
     key="without-hadoop-scala-2.12"
-    args="-Phadoop-provided"
-    extra=""
-    if ! make_binary_release "$key" "$SCALA_2_12_PROFILES $args" "$extra" "2.12"; then
-      error "Failed to build $key package. Check logs for details."
-    fi
+        args="-Phadoop-provided"
+        extra=""
+        if ! make_binary_release "$key" "$SCALA_2_12_PROFILES $args" "$extra" "2.12"; then
+          error "Failed to build $key package. Check logs for details."
+        fi
   fi
 
   rm -rf spark-$SPARK_VERSION-bin-*/
@@ -389,9 +394,9 @@ if [[ "$1" == "publish-snapshot" ]]; then
   export ZINC_PORT=$(python -S -c "import random; print random.randrange(3030,4030)")
 
   $MVN -DzincPort=$ZINC_PORT --settings $tmp_settings -DskipTests $SCALA_2_11_PROFILES $PUBLISH_PROFILES deploy
-  #./dev/change-scala-version.sh 2.12
-  #$MVN -DzincPort=$ZINC_PORT --settings $tmp_settings \
-  #  -DskipTests $SCALA_2_12_PROFILES $PUBLISH_PROFILES clean deploy
+    #./dev/change-scala-version.sh 2.12
+    #$MVN -DzincPort=$ZINC_PORT --settings $tmp_settings \
+    #  -DskipTests $SCALA_2_12_PROFILES $PUBLISH_PROFILES clean deploy
 
   rm $tmp_settings
   cd ..
@@ -426,15 +431,15 @@ if [[ "$1" == "publish-release" ]]; then
   $MVN -DzincPort=$ZINC_PORT -Dmaven.repo.local=$tmp_repo -DskipTests $SCALA_2_11_PROFILES $PUBLISH_PROFILES clean install
 
   if ! is_dry_run && [[ $PUBLISH_SCALA_2_10 = 1 ]]; then
-    ./dev/change-scala-version.sh 2.10
-    $MVN -DzincPort=$((ZINC_PORT + 1)) -Dmaven.repo.local=$tmp_repo -Dscala-2.10 \
-      -DskipTests $PUBLISH_PROFILES $SCALA_2_10_PROFILES clean install
+      ./dev/change-scala-version.sh 2.10
+      $MVN -DzincPort=$((ZINC_PORT + 1)) -Dmaven.repo.local=$tmp_repo -Dscala-2.10 \
+        -DskipTests $PUBLISH_PROFILES $SCALA_2_10_PROFILES clean install
   fi
 
   if ! is_dry_run && [[ $PUBLISH_SCALA_2_12 = 1 ]]; then
     ./dev/change-scala-version.sh 2.12
     $MVN -DzincPort=$((ZINC_PORT + 2)) -Dmaven.repo.local=$tmp_repo -Dscala-2.12 \
-      -DskipTests $PUBLISH_PROFILES $SCALA_2_12_PROFILES clean install
+          -DskipTests $PUBLISH_PROFILES $SCALA_2_12_PROFILES clean install
   fi
 
   ./dev/change-scala-version.sh 2.11

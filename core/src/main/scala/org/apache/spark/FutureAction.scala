@@ -140,18 +140,19 @@ private[spark] object FutureAction {
     }
 
   private[spark] def transform[T, S](
-      future: Future[T],
-      f: (Try[T]) => Try[S],
-      executor: ExecutionContext): Future[S] =
+                                      future: Future[T],
+                                      f: (Try[T]) => Try[S],
+                                      executor: ExecutionContext): Future[S] =
     transformTryMethod.invoke(future, f, executor).asInstanceOf[Future[S]]
 
   private[spark] def transformWith[T, S](
-      future: Future[T],
-      f: (Try[T]) => Future[S],
-      executor: ExecutionContext): Future[S] =
+                                          future: Future[T],
+                                          f: (Try[T]) => Future[S],
+                                          executor: ExecutionContext): Future[S] =
     transformWithTryMethod.invoke(future, f, executor).asInstanceOf[Future[S]]
 
 }
+
 
 
 /**
