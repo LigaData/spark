@@ -50,6 +50,7 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.parser.{CatalystSqlParser, ParseException}
 import org.apache.spark.sql.execution.QueryExecutionException
 import org.apache.spark.sql.hive.HiveExternalCatalog
+import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.hive.HiveExternalCatalog.{DATASOURCE_SCHEMA, DATASOURCE_SCHEMA_NUMPARTS, DATASOURCE_SCHEMA_PART_PREFIX}
 import org.apache.spark.sql.hive.client.HiveClientImpl._
 import org.apache.spark.sql.internal.SQLConf
@@ -121,7 +122,7 @@ private[hive] class HiveClientImpl(
         Thread.currentThread().setContextClassLoader(original)
       }
     } else {
-      // Isolation off means we detect a CliSessionState instance in current thread.
+      // "Isolation off means we detect a CliSessionState instance in current thread."
       // 1: Inside the spark project, we have already started a CliSessionState in
       // `SparkSQLCLIDriver`, which contains configurations from command lines. Later, we call
       // `SparkSQLEnv.init()` there, which would new a hive client again. so we should keep those
