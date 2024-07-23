@@ -74,8 +74,8 @@ private[spark] object HiveUtils extends Logging {
   // already rely on this config.
   val FAKE_HIVE_VERSION = buildConf("spark.sql.hive.version")
     .doc(s"deprecated, please use ${HIVE_METASTORE_VERSION.key} to get the Hive version in Spark.")
-    .version("1.1.1")
-    .fallbackConf(HIVE_METASTORE_VERSION)
+    .stringConf
+    .createWithDefault(builtinHiveVersion)
 
   val HIVE_METASTORE_JARS = buildStaticConf("spark.sql.hive.metastore.jars")
     .doc(s"""
@@ -106,7 +106,6 @@ private[spark] object HiveUtils extends Logging {
       .doc("When true, also tries to merge possibly different but compatible Parquet schemas in " +
         "different Parquet data files. This configuration is only effective " +
         "when \"spark.sql.hive.convertMetastoreParquet\" is true.")
-      .version("1.3.1")
       .booleanConf
       .createWithDefault(false)
 
@@ -230,6 +229,8 @@ private[spark] object HiveUtils extends Logging {
       ConfVars.METASTORE_AGGREGATE_STATS_CACHE_MAX_READER_WAIT -> TimeUnit.MILLISECONDS,
       ConfVars.HIVES_AUTO_PROGRESS_TIMEOUT -> TimeUnit.SECONDS,
       ConfVars.HIVE_LOG_INCREMENTAL_PLAN_PROGRESS_INTERVAL -> TimeUnit.MILLISECONDS,
+//      ConfVars.HIVE_STATS_JDBC_TIMEOUT -> TimeUnit.SECONDS,
+//      ConfVars.HIVE_STATS_RETRIES_WAIT -> TimeUnit.MILLISECONDS,
       ConfVars.HIVE_LOCK_SLEEP_BETWEEN_RETRIES -> TimeUnit.SECONDS,
       ConfVars.HIVE_ZOOKEEPER_SESSION_TIMEOUT -> TimeUnit.MILLISECONDS,
       ConfVars.HIVE_ZOOKEEPER_CONNECTION_BASESLEEPTIME -> TimeUnit.MILLISECONDS,
@@ -258,8 +259,6 @@ private[spark] object HiveUtils extends Logging {
     ).map { case (confVar, unit) =>
       confVar.varname -> HiveConf.getTimeVar(hadoopConf, confVar, unit).toString
     }
-
-    // The following configurations were removed by HIVE-12164(Hive 2.0)
     val hardcodingTimeVars = Seq(
       ("hive.stats.jdbc.timeout", "30s") -> TimeUnit.SECONDS,
       ("hive.stats.retries.wait", "3000ms") -> TimeUnit.MILLISECONDS
@@ -290,15 +289,15 @@ private[spark] object HiveUtils extends Logging {
   /**
    * Create a [[HiveClient]] used for execution.
    *
-   * Currently this must always be the Hive built-in version that packaged
+   * Currently this must always be Hive 13 as this is the version of Hive that is packaged
    * with Spark SQL. This copy of the client is used for execution related tasks like
    * registering temporary functions or ensuring that the ThreadLocal SessionState is
    * correctly populated.  This copy of Hive is *not* used for storing persistent metadata,
    * and only point to a dummy metastore in a temporary directory.
    */
   protected[hive] def newClientForExecution(
-                                             conf: SparkConf,
-                                             hadoopConf: Configuration): HiveClientImpl = {
+      conf: SparkConf,
+      hadoopConf: Configuration): HiveClientImpl = {
     logInfo(s"Initializing execution hive, version $builtinHiveVersion")
     val loader = new IsolatedClientLoader(
       version = IsolatedClientLoader.hiveVersion(builtinHiveVersion),
@@ -318,8 +317,8 @@ private[spark] object HiveUtils extends Logging {
    * in the hive-site.xml file.
    */
   protected[hive] def newClientForMetadata(
-                                            conf: SparkConf,
-                                            hadoopConf: Configuration): HiveClient = {
+      conf: SparkConf,
+      hadoopConf: Configuration): HiveClient = {
     val configurations = formatTimeVarsForHiveClient(hadoopConf)
     newClientForMetadata(conf, hadoopConf, configurations)
   }
@@ -402,17 +401,17 @@ private[spark] object HiveUtils extends Logging {
         hiveMetastoreJars
           .split(File.pathSeparator)
           .flatMap {
-            case path if new File(path).getName == "*" =>
-              val files = new File(path).getParentFile.listFiles()
-              if (files == null) {
-                logWarning(s"Hive jar path '$path' does not exist.")
-                Nil
-              } else {
-                files.filter(_.getName.toLowerCase(Locale.ROOT).endsWith(".jar"))
-              }
-            case path =>
-              new File(path) :: Nil
-          }
+          case path if new File(path).getName == "*" =>
+            val files = new File(path).getParentFile.listFiles()
+            if (files == null) {
+              logWarning(s"Hive jar path '$path' does not exist.")
+              Nil
+            } else {
+              files.filter(_.getName.toLowerCase(Locale.ROOT).endsWith(".jar"))
+            }
+          case path =>
+            new File(path) :: Nil
+        }
           .map(_.toURI.toURL)
 
       logInfo(
