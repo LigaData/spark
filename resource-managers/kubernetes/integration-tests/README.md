@@ -108,7 +108,7 @@ properties to Maven.  For example:
     mvn integration-test -am -pl :spark-kubernetes-integration-tests_2.11 \
                             -Pkubernetes -Pkubernetes-integration-tests \ 
                             -Phadoop-2.7 -Dhadoop.version=2.7.4 \
-                            -Dspark.kubernetes.test.sparkTgz=spark-3.0.0-SNAPSHOT-bin-example.tgz \
+                            -Dspark.kubernetes.test.sparkTgz=spark-2.4.7-bin-example.tgz \
                             -Dspark.kubernetes.test.imageTag=sometag \
                             -Dspark.kubernetes.test.imageRepo=docker.io/somerepo \
                             -Dspark.kubernetes.test.namespace=spark-int-tests \

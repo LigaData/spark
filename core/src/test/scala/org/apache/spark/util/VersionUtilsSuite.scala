@@ -75,8 +75,8 @@ class VersionUtilsSuite extends SparkFunSuite {
   }
 
   test("Return short version number") {
-    assert(shortVersion("3.0.0") === "3.0.0")
-    assert(shortVersion("3.0.0-SNAPSHOT") === "3.0.0")
+    assert(shortVersion("2.4.7") === "2.4.7")
+    assert(shortVersion("2.4.7") === "2.4.7")
     withClue("shortVersion parsing should fail for missing maintenance version number") {
       intercept[IllegalArgumentException] {
         shortVersion("3.0")

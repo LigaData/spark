@@ -39,7 +39,7 @@ private[spark] object VersionUtils {
 
   /**
    * Given a Spark version string, return the short version string.
-   * E.g., for 3.0.0-SNAPSHOT, return '3.0.0'.
+   * E.g., for 2.4.7, return '2.4.7'.
    */
   def shortVersion(sparkVersion: String): String = {
     shortVersionRegex.findFirstMatchIn(sparkVersion) match {
