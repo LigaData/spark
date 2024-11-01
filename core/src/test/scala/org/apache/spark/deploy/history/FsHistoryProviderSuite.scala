@@ -1200,7 +1200,7 @@ class FsHistoryProviderSuite extends SparkFunSuite with BeforeAndAfter with Matc
   private def writeFile(file: File, isNewFormat: Boolean, codec: Option[CompressionCodec],
     events: SparkListenerEvent*) = {
     val fstream = new FileOutputStream(file)
-    val cstream = codec.map(_.compressedContinuousOutputStream(fstream)).getOrElse(fstream)
+    val cstream = codec.map(_.compressedOutputStream(fstream)).getOrElse(fstream)
     val bstream = new BufferedOutputStream(cstream)
     if (isNewFormat) {
       val newFormatStream = new FileOutputStream(file)
