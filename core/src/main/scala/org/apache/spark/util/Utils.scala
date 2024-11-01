@@ -60,6 +60,7 @@ import org.apache.spark._
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.internal.config._
+import org.apache.spark.internal.config.Streaming._
 import org.apache.spark.internal.config.Tests.IS_TESTING
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.internal.config.Worker._
@@ -67,6 +68,7 @@ import org.apache.spark.launcher.SparkLauncher
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.serializer.{DeserializationStream, SerializationStream, SerializerInstance}
 import org.apache.spark.status.api.v1.{StackTrace, ThreadStackTrace}
+import org.apache.spark.util.io.ChunkedByteBufferOutputStream
 
 /** CallSite represents a place in user code. It can have a short and a long form. */
 private[spark] case class CallSite(shortForm: String, longForm: String)
@@ -97,6 +99,8 @@ private[spark] object Utils extends Logging {
 
   /** Scheme used for files that are locally available on worker nodes in the cluster. */
   val LOCAL_SCHEME = "local"
+
+  private val PATTERN_FOR_COMMAND_LINE_ARG = "-D(.+?)=(.+)".r
 
   /** Serialize an object using Java serialization */
   def serialize[T](o: T): Array[Byte] = {
@@ -142,7 +146,7 @@ private[spark] object Utils extends Logging {
 
   /** Serialize via nested stream using specific serializer */
   def serializeViaNestedStream(os: OutputStream, ser: SerializerInstance)(
-      f: SerializationStream => Unit): Unit = {
+    f: SerializationStream => Unit): Unit = {
     val osWrapper = ser.serializeStream(new OutputStream {
       override def write(b: Int): Unit = os.write(b)
       override def write(b: Array[Byte], off: Int, len: Int): Unit = os.write(b, off, len)
@@ -156,7 +160,7 @@ private[spark] object Utils extends Logging {
 
   /** Deserialize via nested stream using specific serializer */
   def deserializeViaNestedStream(is: InputStream, ser: SerializerInstance)(
-      f: DeserializationStream => Unit): Unit = {
+    f: DeserializationStream => Unit): Unit = {
     val isWrapper = ser.deserializeStream(new InputStream {
       override def read(): Int = is.read()
       override def read(b: Array[Byte], off: Int, len: Int): Int = is.read(b, off, len)
@@ -185,15 +189,24 @@ private[spark] object Utils extends Logging {
 
   /** Determines whether the provided class is loadable in the current thread. */
   def classIsLoadable(clazz: String): Boolean = {
-    // scalastyle:off classforname
-    Try { Class.forName(clazz, false, getContextOrSparkClassLoader) }.isSuccess
-    // scalastyle:on classforname
+    Try { classForName(clazz, initialize = false) }.isSuccess
   }
 
   // scalastyle:off classforname
-  /** Preferred alternative to Class.forName(className) */
-  def classForName(className: String): Class[_] = {
-    Class.forName(className, true, getContextOrSparkClassLoader)
+  /**
+   * Preferred alternative to Class.forName(className), as well as
+   * Class.forName(className, initialize, loader) with current thread's ContextClassLoader.
+   */
+  def classForName[C](
+                       className: String,
+                       initialize: Boolean = true,
+                       noSparkClassLoader: Boolean = false): Class[C] = {
+    if (!noSparkClassLoader) {
+      Class.forName(className, initialize, getContextOrSparkClassLoader).asInstanceOf[Class[C]]
+    } else {
+      Class.forName(className, initialize, Thread.currentThread().getContextClassLoader).
+        asInstanceOf[Class[C]]
+    }
     // scalastyle:on classforname
   }
 
@@ -248,11 +261,11 @@ private[spark] object Utils extends Logging {
    */
   def chmod700(file: File): Boolean = {
     file.setReadable(false, false) &&
-    file.setReadable(true, true) &&
-    file.setWritable(false, false) &&
-    file.setWritable(true, true) &&
-    file.setExecutable(false, false) &&
-    file.setExecutable(true, true)
+      file.setReadable(true, true) &&
+      file.setWritable(false, false) &&
+      file.setWritable(true, true) &&
+      file.setExecutable(false, false) &&
+      file.setExecutable(true, true)
   }
 
   /**
@@ -285,8 +298,8 @@ private[spark] object Utils extends Logging {
    * automatically deleted when the VM shuts down.
    */
   def createTempDir(
-      root: String = System.getProperty("java.io.tmpdir"),
-      namePrefix: String = "spark"): File = {
+                     root: String = System.getProperty("java.io.tmpdir"),
+                     namePrefix: String = "spark"): File = {
     val dir = createDirectory(root, namePrefix)
     ShutdownHookManager.registerShutdownDeleteDir(dir)
     dir
@@ -298,10 +311,10 @@ private[spark] object Utils extends Logging {
    * the parameter transferToEnabled should be configured by spark.file.transferTo = [true|false].
    */
   def copyStream(
-      in: InputStream,
-      out: OutputStream,
-      closeStreams: Boolean = false,
-      transferToEnabled: Boolean = false): Long = {
+                  in: InputStream,
+                  out: OutputStream,
+                  closeStreams: Boolean = false,
+                  transferToEnabled: Boolean = false): Long = {
     tryWithSafeFinally {
       if (in.isInstanceOf[FileInputStream] && out.isInstanceOf[FileOutputStream]
         && transferToEnabled) {
@@ -335,11 +348,55 @@ private[spark] object Utils extends Logging {
     }
   }
 
+  /**
+   * Copy the first `maxSize` bytes of data from the InputStream to an in-memory
+   * buffer, primarily to check for corruption.
+   *
+   * This returns a new InputStream which contains the same data as the original input stream.
+   * It may be entirely on in-memory buffer, or it may be a combination of in-memory data, and then
+   * continue to read from the original stream. The only real use of this is if the original input
+   * stream will potentially detect corruption while the data is being read (eg. from compression).
+   * This allows for an eager check of corruption in the first maxSize bytes of data.
+   *
+   * @return An InputStream which includes all data from the original stream (combining buffered
+   *         data and remaining data in the original stream)
+   */
+  def copyStreamUpTo(in: InputStream, maxSize: Long): InputStream = {
+    var count = 0L
+    val out = new ChunkedByteBufferOutputStream(64 * 1024, ByteBuffer.allocate)
+    val fullyCopied = tryWithSafeFinally {
+      val bufSize = Math.min(8192L, maxSize)
+      val buf = new Array[Byte](bufSize.toInt)
+      var n = 0
+      while (n != -1 && count < maxSize) {
+        n = in.read(buf, 0, Math.min(maxSize - count, bufSize).toInt)
+        if (n != -1) {
+          out.write(buf, 0, n)
+          count += n
+        }
+      }
+      count < maxSize
+    } {
+      try {
+        if (count < maxSize) {
+          in.close()
+        }
+      } finally {
+        out.close()
+      }
+    }
+    if (fullyCopied) {
+      out.toChunkedByteBuffer.toInputStream(dispose = true)
+    } else {
+      new SequenceInputStream( out.toChunkedByteBuffer.toInputStream(dispose = true), in)
+    }
+  }
+
   def copyFileStreamNIO(
-      input: FileChannel,
-      output: FileChannel,
-      startPosition: Long,
-      bytesToCopy: Long): Unit = {
+                         input: FileChannel,
+                         output: FileChannel,
+                         startPosition: Long,
+                         bytesToCopy: Long): Unit = {
     val initialPos = output.position()
     var count = 0L
     // In case transferTo method transferred less data than we have required.
@@ -364,22 +421,6 @@ private[spark] object Utils extends Logging {
          |this is a kernel bug which will lead to unexpected behavior when using transferTo.
          |You can set spark.file.transferTo = false to disable this NIO feature.
            """.stripMargin)
-  }
-
-  /**
-   * Construct a URI container information used for authentication.
-   * This also sets the default authenticator to properly negotiation the
-   * user/password based on the URI.
-   *
-   * Note this relies on the Authenticator.setDefault being set properly to decode
-   * the user name and password. This is currently set in the SecurityManager.
-   */
-  def constructURIForAuthentication(uri: URI, securityMgr: SecurityManager): URI = {
-    val userCred = securityMgr.getSecretKey()
-    if (userCred == null) throw new Exception("Secret key is null with authentication on")
-    val userInfo = securityMgr.getHttpUser()  + ":" + userCred
-    new URI(uri.getScheme(), userInfo, uri.getHost(), uri.getPort(), uri.getPath(),
-      uri.getQuery(), uri.getFragment())
   }
 
   /**
@@ -420,13 +461,13 @@ private[spark] object Utils extends Logging {
    * the requested file.
    */
   def fetchFile(
-      url: String,
-      targetDir: File,
-      conf: SparkConf,
-      securityMgr: SecurityManager,
-      hadoopConf: Configuration,
-      timestamp: Long,
-      useCache: Boolean): File = {
+                 url: String,
+                 targetDir: File,
+                 conf: SparkConf,
+                 securityMgr: SecurityManager,
+                 hadoopConf: Configuration,
+                 timestamp: Long,
+                 useCache: Boolean): File = {
     val fileName = decodeFileNameInURI(new URI(url))
     val targetFile = new File(targetDir, fileName)
     val fetchCacheEnabled = conf.getBoolean("spark.files.useFetchCache", defaultValue = true)
@@ -510,10 +551,10 @@ private[spark] object Utils extends Logging {
    *                      `sourceFile`
    */
   private def downloadFile(
-      url: String,
-      in: InputStream,
-      destFile: File,
-      fileOverwrite: Boolean): Unit = {
+                            url: String,
+                            in: InputStream,
+                            destFile: File,
+                            fileOverwrite: Boolean): Unit = {
     val tempFile = File.createTempFile("fetchFileTemp", null,
       new File(destFile.getParentFile.getAbsolutePath))
     logInfo(s"Fetching $url to $tempFile")
@@ -548,11 +589,11 @@ private[spark] object Utils extends Logging {
    *                         `destFile`.
    */
   private def copyFile(
-      url: String,
-      sourceFile: File,
-      destFile: File,
-      fileOverwrite: Boolean,
-      removeSourceFile: Boolean = false): Unit = {
+                        url: String,
+                        sourceFile: File,
+                        destFile: File,
+                        fileOverwrite: Boolean,
+                        removeSourceFile: Boolean = false): Unit = {
 
     if (destFile.exists) {
       if (!filesEqualRecursive(sourceFile, destFile)) {
@@ -633,12 +674,12 @@ private[spark] object Utils extends Logging {
    * the requested file.
    */
   def doFetchFile(
-      url: String,
-      targetDir: File,
-      filename: String,
-      conf: SparkConf,
-      securityMgr: SecurityManager,
-      hadoopConf: Configuration): File = {
+                   url: String,
+                   targetDir: File,
+                   filename: String,
+                   conf: SparkConf,
+                   securityMgr: SecurityManager,
+                   hadoopConf: Configuration): File = {
     val targetFile = new File(targetDir, filename)
     val uri = new URI(url)
     val fileOverwrite = conf.getBoolean("spark.files.overwrite", defaultValue = false)
@@ -652,17 +693,7 @@ private[spark] object Utils extends Logging {
         val is = Channels.newInputStream(source)
         downloadFile(url, is, targetFile, fileOverwrite)
       case "http" | "https" | "ftp" =>
-        var uc: URLConnection = null
-        if (securityMgr.isAuthenticationEnabled()) {
-          logDebug("fetchFile with security enabled")
-          val newuri = constructURIForAuthentication(uri, securityMgr)
-          uc = newuri.toURL().openConnection()
-          uc.setAllowUserInteraction(false)
-        } else {
-          logDebug("fetchFile not using security")
-          uc = new URL(url).openConnection()
-        }
-
+        val uc = new URL(url).openConnection()
         val timeoutMs =
           conf.getTimeAsSeconds("spark.files.fetchTimeout", "60s").toInt * 1000
         uc.setConnectTimeout(timeoutMs)
@@ -679,7 +710,7 @@ private[spark] object Utils extends Logging {
         val fs = getHadoopFileSystem(uri, hadoopConf)
         val path = new Path(uri)
         fetchHcfsFile(path, targetDir, fs, conf, hadoopConf, fileOverwrite,
-                      filename = Some(filename))
+          filename = Some(filename))
     }
 
     targetFile
@@ -691,13 +722,13 @@ private[spark] object Utils extends Logging {
    * Visible for testing
    */
   private[spark] def fetchHcfsFile(
-      path: Path,
-      targetDir: File,
-      fs: FileSystem,
-      conf: SparkConf,
-      hadoopConf: Configuration,
-      fileOverwrite: Boolean,
-      filename: Option[String] = None): Unit = {
+                                    path: Path,
+                                    targetDir: File,
+                                    fs: FileSystem,
+                                    conf: SparkConf,
+                                    hadoopConf: Configuration,
+                                    fileOverwrite: Boolean,
+                                    filename: Option[String] = None): Unit = {
     if (!targetDir.exists() && !targetDir.mkdir()) {
       throw new IOException(s"Failed to create directory ${targetDir.getPath}")
     }
@@ -830,7 +861,7 @@ private[spark] object Utils extends Logging {
     if (uris.nonEmpty) {
       logWarning(
         "The configured local directories are not expected to be URIs; however, got suspicious " +
-        s"values [${uris.mkString(", ")}]. Please check your configured local directories.")
+          s"values [${uris.mkString(", ")}]. Please check your configured local directories.")
     }
 
     configuredLocalDirs.flatMap { root =>
@@ -1005,9 +1036,10 @@ private[spark] object Utils extends Logging {
 
   /**
    * Return the string to tell how long has passed in milliseconds.
+   * @param startTimeNs - a timestamp in nanoseconds returned by `System.nanoTime`.
    */
-  def getUsedTimeMs(startTimeMs: Long): String = {
-    " " + (System.currentTimeMillis - startTimeMs) + " ms"
+  def getUsedTimeNs(startTimeNs: Long): String = {
+    s"${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNs)} ms"
   }
 
   /**
@@ -1037,9 +1069,9 @@ private[spark] object Utils extends Logging {
     val cutoffTimeInMillis = System.currentTimeMillis - (cutoff * 1000)
 
     filesAndDirs.exists(_.lastModified() > cutoffTimeInMillis) ||
-    filesAndDirs.filter(_.isDirectory).exists(
-      subdir => doesDirectoryContainAnyNewFiles(subdir, cutoff)
-    )
+      filesAndDirs.filter(_.isDirectory).exists(
+        subdir => doesDirectoryContainAnyNewFiles(subdir, cutoff)
+      )
   }
 
   /**
@@ -1173,10 +1205,10 @@ private[spark] object Utils extends Logging {
    * Execute a command and return the process running the command.
    */
   def executeCommand(
-      command: Seq[String],
-      workingDir: File = new File("."),
-      extraEnvironment: Map[String, String] = Map.empty,
-      redirectStderr: Boolean = true): Process = {
+                      command: Seq[String],
+                      workingDir: File = new File("."),
+                      extraEnvironment: Map[String, String] = Map.empty,
+                      redirectStderr: Boolean = true): Process = {
     val builder = new ProcessBuilder(command: _*).directory(workingDir)
     val environment = builder.environment()
     for ((key, value) <- extraEnvironment) {
@@ -1195,10 +1227,10 @@ private[spark] object Utils extends Logging {
    * Execute a command and get its output, throwing an exception if it yields a code other than 0.
    */
   def executeAndGetOutput(
-      command: Seq[String],
-      workingDir: File = new File("."),
-      extraEnvironment: Map[String, String] = Map.empty,
-      redirectStderr: Boolean = true): String = {
+                           command: Seq[String],
+                           workingDir: File = new File("."),
+                           extraEnvironment: Map[String, String] = Map.empty,
+                           redirectStderr: Boolean = true): String = {
     val process = executeCommand(command, workingDir, extraEnvironment, redirectStderr)
     val output = new StringBuilder
     val threadName = "read stdout for " + command(0)
@@ -1217,9 +1249,9 @@ private[spark] object Utils extends Logging {
    * Return and start a daemon thread that processes the content of the input stream line by line.
    */
   def processStreamByLine(
-      threadName: String,
-      inputStream: InputStream,
-      processLine: String => Unit): Thread = {
+                           threadName: String,
+                           inputStream: InputStream,
+                           processLine: String => Unit): Thread = {
     val t = new Thread(threadName) {
       override def run() {
         for (line <- Source.fromInputStream(inputStream).getLines()) {
@@ -1346,7 +1378,7 @@ private[spark] object Utils extends Logging {
    * exception from the original `out.write` call.
    */
   def tryWithSafeFinallyAndFailureCallbacks[T](block: => T)
-      (catchBlock: => Unit = (), finallyBlock: => Unit = ()): T = {
+                                              (catchBlock: => Unit = (), finallyBlock: => Unit = ()): T = {
     var originalThrowable: Throwable = null
     try {
       block
@@ -1382,7 +1414,7 @@ private[spark] object Utils extends Logging {
   // A regular expression to match classes of the internal Spark API's
   // that we want to skip when finding the call site of a method.
   private val SPARK_CORE_CLASS_REGEX =
-    """^org\.apache\.spark(\.api\.java)?(\.util)?(\.rdd)?(\.broadcast)?\.[A-Z]""".r
+  """^org\.apache\.spark(\.api\.java)?(\.util)?(\.rdd)?(\.broadcast)?\.[A-Z]""".r
   private val SPARK_SQL_CLASS_REGEX = """^org\.apache\.spark\.sql.*""".r
 
   /** Default filtering function for finding call sites using `getCallSite`. */
@@ -1460,17 +1492,17 @@ private[spark] object Utils extends Logging {
 
   private var compressedLogFileLengthCache: LoadingCache[String, java.lang.Long] = null
   private def getCompressedLogFileLengthCache(
-      sparkConf: SparkConf): LoadingCache[String, java.lang.Long] = this.synchronized {
+                                               sparkConf: SparkConf): LoadingCache[String, java.lang.Long] = this.synchronized {
     if (compressedLogFileLengthCache == null) {
       val compressedLogFileLengthCacheSize = sparkConf.get(
         UNCOMPRESSED_LOG_FILE_LENGTH_CACHE_SIZE_CONF)
       compressedLogFileLengthCache = CacheBuilder.newBuilder()
         .maximumSize(compressedLogFileLengthCacheSize)
         .build[String, java.lang.Long](new CacheLoader[String, java.lang.Long]() {
-        override def load(path: String): java.lang.Long = {
-          Utils.getCompressedFileLength(new File(path))
-        }
-      })
+          override def load(path: String): java.lang.Long = {
+            Utils.getCompressedFileLength(new File(path))
+          }
+        })
     }
     compressedLogFileLengthCache
   }
@@ -1658,10 +1690,10 @@ private[spark] object Utils extends Logging {
     buf
   }
 
- /* Calculates 'x' modulo 'mod', takes to consideration sign of x,
-  * i.e. if 'x' is negative, than 'x' % 'mod' is negative too
-  * so function return (x % mod) + mod in that case.
-  */
+  /* Calculates 'x' modulo 'mod', takes to consideration sign of x,
+   * i.e. if 'x' is negative, than 'x' % 'mod' is negative too
+   * so function return (x % mod) + mod in that case.
+   */
   def nonNegativeMod(x: Int, mod: Int): Int = {
     val rawMod = x % mod
     rawMod + (if (rawMod < 0) mod else 0)
@@ -1738,23 +1770,23 @@ private[spark] object Utils extends Logging {
    *
    * @param numIters number of iterations
    * @param f function to be executed. If prepare is not None, the running time of each call to f
-   *          must be an order of magnitude longer than one millisecond for accurate timing.
+   *          must be an order of magnitude longer than one nanosecond for accurate timing.
    * @param prepare function to be executed before each call to f. Its running time doesn't count.
-   * @return the total time across all iterations (not counting preparation time)
+   * @return the total time across all iterations (not counting preparation time) in nanoseconds.
    */
   def timeIt(numIters: Int)(f: => Unit, prepare: Option[() => Unit] = None): Long = {
     if (prepare.isEmpty) {
-      val start = System.currentTimeMillis
+      val startNs = System.nanoTime()
       times(numIters)(f)
-      System.currentTimeMillis - start
+      System.nanoTime() - startNs
     } else {
       var i = 0
       var sum = 0L
       while (i < numIters) {
         prepare.get.apply()
-        val start = System.currentTimeMillis
+        val startNs = System.nanoTime()
         f
-        sum += System.currentTimeMillis - start
+        sum += System.nanoTime() - startNs
         i += 1
       }
       sum
@@ -2009,8 +2041,8 @@ private[spark] object Utils extends Logging {
    * Provided properties have the highest priority.
    */
   def updateSparkConfigFromProperties(
-      conf: SparkConf,
-      properties: Map[String, String]) : Unit = {
+                                       conf: SparkConf,
+                                       properties: Map[String, String]) : Unit = {
     properties.filter { case (k, v) =>
       k.startsWith("spark.")
     }.foreach { case (k, v) =>
@@ -2106,20 +2138,20 @@ private[spark] object Utils extends Logging {
     // elements for threads that are dead / don't exist.
     val threadInfos = ManagementFactory.getThreadMXBean.dumpAllThreads(true, true).filter(_ != null)
     threadInfos.sortWith { case (threadTrace1, threadTrace2) =>
-        val v1 = if (threadTrace1.getThreadName.contains("Executor task launch")) 1 else 0
-        val v2 = if (threadTrace2.getThreadName.contains("Executor task launch")) 1 else 0
-        if (v1 == v2) {
-          val name1 = threadTrace1.getThreadName().toLowerCase(Locale.ROOT)
-          val name2 = threadTrace2.getThreadName().toLowerCase(Locale.ROOT)
-          val nameCmpRes = name1.compareTo(name2)
-          if (nameCmpRes == 0) {
-            threadTrace1.getThreadId < threadTrace2.getThreadId
-          } else {
-            nameCmpRes < 0
-          }
+      val v1 = if (threadTrace1.getThreadName.contains("Executor task launch")) 1 else 0
+      val v2 = if (threadTrace2.getThreadName.contains("Executor task launch")) 1 else 0
+      if (v1 == v2) {
+        val name1 = threadTrace1.getThreadName().toLowerCase(Locale.ROOT)
+        val name2 = threadTrace2.getThreadName().toLowerCase(Locale.ROOT)
+        val nameCmpRes = name1.compareTo(name2)
+        if (nameCmpRes == 0) {
+          threadTrace1.getThreadId < threadTrace2.getThreadId
         } else {
-          v1 > v2
+          nameCmpRes < 0
         }
+      } else {
+        v1 > v2
+      }
     }.map(threadInfoToThreadStackTrace)
   }
 
@@ -2202,10 +2234,10 @@ private[spark] object Utils extends Logging {
    * @return (service: T, port: Int)
    */
   def startServiceOnPort[T](
-      startPort: Int,
-      startService: Int => (T, Int),
-      conf: SparkConf,
-      serviceName: String = ""): (T, Int) = {
+                             startPort: Int,
+                             startService: Int => (T, Int),
+                             conf: SparkConf,
+                             serviceName: String = ""): (T, Int) = {
 
     require(startPort == 0 || (1024 <= startPort && startPort < 65536),
       "startPort should be between 1024 and 65535 (inclusive), or 0 for a random free port.")
@@ -2468,6 +2500,12 @@ private[spark] object Utils extends Logging {
       (!isLocalMaster(conf) || conf.get(DYN_ALLOCATION_TESTING))
   }
 
+  def isStreamingDynamicAllocationEnabled(conf: SparkConf): Boolean = {
+    val streamingDynamicAllocationEnabled = conf.get(STREAMING_DYN_ALLOCATION_ENABLED)
+    streamingDynamicAllocationEnabled &&
+      (!isLocalMaster(conf) || conf.get(STREAMING_DYN_ALLOCATION_TESTING))
+  }
+
   /**
    * Return the initial number of executors for dynamic allocation.
    */
@@ -2475,13 +2513,13 @@ private[spark] object Utils extends Logging {
     if (conf.get(DYN_ALLOCATION_INITIAL_EXECUTORS) < conf.get(DYN_ALLOCATION_MIN_EXECUTORS)) {
       logWarning(s"${DYN_ALLOCATION_INITIAL_EXECUTORS.key} less than " +
         s"${DYN_ALLOCATION_MIN_EXECUTORS.key} is invalid, ignoring its setting, " +
-          "please update your configs.")
+        "please update your configs.")
     }
 
     if (conf.get(EXECUTOR_INSTANCES).getOrElse(0) < conf.get(DYN_ALLOCATION_MIN_EXECUTORS)) {
       logWarning(s"${EXECUTOR_INSTANCES.key} less than " +
         s"${DYN_ALLOCATION_MIN_EXECUTORS.key} is invalid, ignoring its setting, " +
-          "please update your configs.")
+        "please update your configs.")
     }
 
     val initialExecutors = Seq(
@@ -2491,7 +2529,7 @@ private[spark] object Utils extends Logging {
 
     logInfo(s"Using initial executors = $initialExecutors, max of " +
       s"${DYN_ALLOCATION_INITIAL_EXECUTORS.key}, ${DYN_ALLOCATION_MIN_EXECUTORS.key} and " +
-        s"${EXECUTOR_INSTANCES.key}")
+      s"${EXECUTOR_INSTANCES.key}")
     initialExecutors
   }
 
@@ -2616,6 +2654,17 @@ private[spark] object Utils extends Logging {
     redact(redactionPattern, kvs.toArray)
   }
 
+  def redactCommandLineArgs(conf: SparkConf, commands: Seq[String]): Seq[String] = {
+    val redactionPattern = conf.get(SECRET_REDACTION_PATTERN)
+    commands.map {
+      case PATTERN_FOR_COMMAND_LINE_ARG(key, value) =>
+        val (_, newValue) = redact(redactionPattern, Seq((key, value))).head
+        s"-D$key=$newValue"
+
+      case cmd => cmd
+    }
+  }
+
   def stringToSeq(str: String): Seq[String] = {
     str.split(",").map(_.trim()).filter(_.nonEmpty)
   }
@@ -2632,10 +2681,11 @@ private[spark] object Utils extends Logging {
    * other state) and decide they do not need to be added. A log message is printed in that case.
    * Other exceptions are bubbled up.
    */
-  def loadExtensions[T](extClass: Class[T], classes: Seq[String], conf: SparkConf): Seq[T] = {
+  def loadExtensions[T <: AnyRef](
+                                   extClass: Class[T], classes: Seq[String], conf: SparkConf): Seq[T] = {
     classes.flatMap { name =>
       try {
-        val klass = classForName(name)
+        val klass = classForName[T](name)
         require(extClass.isAssignableFrom(klass),
           s"$name is not a subclass of ${extClass.getName()}.")
 
@@ -2878,15 +2928,15 @@ private[util] object CallerContext extends Logging {
  * @param taskAttemptNumber task attempt id
  */
 private[spark] class CallerContext(
-  from: String,
-  upstreamCallerContext: Option[String] = None,
-  appId: Option[String] = None,
-  appAttemptId: Option[String] = None,
-  jobId: Option[Int] = None,
-  stageId: Option[Int] = None,
-  stageAttemptId: Option[Int] = None,
-  taskId: Option[Long] = None,
-  taskAttemptNumber: Option[Int] = None) extends Logging {
+                                    from: String,
+                                    upstreamCallerContext: Option[String] = None,
+                                    appId: Option[String] = None,
+                                    appAttemptId: Option[String] = None,
+                                    jobId: Option[Int] = None,
+                                    stageId: Option[Int] = None,
+                                    stageAttemptId: Option[Int] = None,
+                                    taskId: Option[Long] = None,
+                                    taskAttemptNumber: Option[Int] = None) extends Logging {
 
   private val context = prepareContext("SPARK_" +
     from +
@@ -2935,10 +2985,10 @@ private[spark] class CallerContext(
  * A utility class to redirect the child process's stdout or stderr.
  */
 private[spark] class RedirectThread(
-    in: InputStream,
-    out: OutputStream,
-    name: String,
-    propagateEof: Boolean = false)
+                                     in: InputStream,
+                                     out: OutputStream,
+                                     name: String,
+                                     propagateEof: Boolean = false)
   extends Thread(name) {
 
   setDaemon(true)
