@@ -85,7 +85,7 @@ class ReplayListenerSuite extends SparkFunSuite with BeforeAndAfter with LocalSp
   test("Replay compressed inprogress log file succeeding on partial read") {
     val buffered = new ByteArrayOutputStream
     val codec = new LZ4CompressionCodec(new SparkConf())
-    val compstream = codec.compressedOutputStream(buffered)
+    val compstream = codec.compressedContinuousOutputStream(buffered)
     Utils.tryWithResource(new PrintWriter(compstream)) { writer =>
 
       val applicationStart = SparkListenerApplicationStart("AppStarts", None,
