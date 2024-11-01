@@ -197,11 +197,12 @@ private[spark] class MetricsSystem private (
       val classPath = kv._2.getProperty("class")
       if (null != classPath) {
         try {
-          val servlet = Utils.classForName[MetricsServlet](classPath)
-            .getConstructor(
-              classOf[Properties], classOf[MetricRegistry], classOf[SecurityManager])
-            .newInstance(kv._2, registry, securityMgr)
-          metricsServlet = Some(servlet)
+          if (kv._1 == "servlet") {
+            val servlet = Utils.classForName[MetricsServlet](classPath)
+              .getConstructor(
+               classOf[Properties], classOf[MetricRegistry], classOf[SecurityManager])
+              .newInstance(kv._2, registry, securityMgr)
+           metricsServlet = Some(servlet)
           } else {
           val sink = Utils.classForName[Sink](classPath)
             .getConstructor(
