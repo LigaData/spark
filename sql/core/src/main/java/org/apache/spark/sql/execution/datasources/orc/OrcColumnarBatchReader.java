@@ -146,7 +146,8 @@ public class OrcColumnarBatchReader extends RecordReader<Void, ColumnarBatch> {
       int[] requestedDataColIds,
       int[] requestedPartitionColIds,
       InternalRow partitionValues) {
-    batch = orcSchema.createRowBatch(capacity);
+    //updated by hamdan as ORC to match ORC version...
+    batch = orcSchema.createRowBatch(TypeDescription.RowBatchVersion.ORIGINAL, 1024);
     assert(!batch.selectedInUse); // `selectedInUse` should be initialized with `false`.
     assert(requiredFields.length == requestedDataColIds.length);
     assert(requiredFields.length == requestedPartitionColIds.length);
