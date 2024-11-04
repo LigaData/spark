@@ -141,14 +141,13 @@ public class OrcColumnarBatchReader extends RecordReader<Void, ColumnarBatch> {
    * @param partitionValues Values of partition columns.
    */
   public void initBatch(
-      TypeDescription orcSchema,
-      StructField[] requiredFields,
-      int[] requestedDataColIds,
-      int[] requestedPartitionColIds,
-      InternalRow partitionValues) {
-    //updated by hamdan as ORC to match ORC version...
-    batch = orcSchema.createRowBatch(TypeDescription.RowBatchVersion.ORIGINAL, 1024);
-    assert(!batch.selectedInUse); // `selectedInUse` should be initialized with `false`.
+          TypeDescription orcSchema,
+          StructField[] requiredFields,
+          int[] requestedDataColIds,
+          int[] requestedPartitionColIds,
+          InternalRow partitionValues) {
+    wrap = new VectorizedRowBatchWrap(orcSchema.createRowBatch(capacity));
+    assert(!wrap.batch().selectedInUse); // `selectedInUse` should be initialized with `false`.
     assert(requiredFields.length == requestedDataColIds.length);
     assert(requiredFields.length == requestedPartitionColIds.length);
     // If a required column is also partition column, use partition value and don't read from file.
@@ -181,7 +180,8 @@ public class OrcColumnarBatchReader extends RecordReader<Void, ColumnarBatch> {
           missingCol.setIsConstant();
           orcVectorWrappers[i] = missingCol;
         } else {
-          orcVectorWrappers[i] = new OrcColumnVector(dt, batch.cols[colId]);
+          orcVectorWrappers[i] = OrcColumnVectorUtils.toOrcColumnVector(
+                  dt, wrap.batch().cols[colId]);
         }
       }
     }

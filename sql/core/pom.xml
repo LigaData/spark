@@ -32,6 +32,8 @@
   <url>http://spark.apache.org/</url>
   <properties>
     <sbt.project.name>sql</sbt.project.name>
+    <orc.version>1.6.14</orc.version>
+    <orc.deps.scope>compile</orc.deps.scope>
   </properties>
 
   <dependencies>
@@ -90,11 +92,13 @@
       <groupId>org.apache.orc</groupId>
       <artifactId>orc-core</artifactId>
       <classifier>${orc.version}</classifier>
+      <scope>${orc.deps.scope}</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.orc</groupId>
       <artifactId>orc-mapreduce</artifactId>
-      <classifier>${orc.classifier}</classifier>
+      <classifier>${orc.version}</classifier>
+      <scope>${orc.deps.scope}</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.parquet</groupId>
