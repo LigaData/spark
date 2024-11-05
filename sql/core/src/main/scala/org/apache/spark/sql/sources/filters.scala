@@ -218,3 +218,27 @@ case class StringEndsWith(attribute: String, value: String) extends Filter {
 case class StringContains(attribute: String, value: String) extends Filter {
   override def references: Array[String] = Array(attribute)
 }
+
+/**
+ * A filter that always evaluates to `true`.
+ */
+@Evolving
+case class AlwaysTrue() extends Filter {
+  override def references: Array[String] = Array.empty
+}
+
+@Evolving
+object AlwaysTrue extends AlwaysTrue {
+}
+
+/**
+ * A filter that always evaluates to `false`.
+ */
+@Evolving
+case class AlwaysFalse() extends Filter {
+  override def references: Array[String] = Array.empty
+}
+
+@Evolving
+object AlwaysFalse extends AlwaysFalse {
+}
