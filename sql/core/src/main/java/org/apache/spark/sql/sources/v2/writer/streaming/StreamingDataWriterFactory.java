@@ -17,43 +17,68 @@
 
 package org.apache.spark.sql.sources.v2.writer.streaming;
 
-import java.io.Serializable;
-
-import org.apache.spark.TaskContext;
 import org.apache.spark.annotation.Evolving;
-import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.sources.v2.writer.DataWriter;
+import org.apache.spark.sql.sources.v2.writer.WriterCommitMessage;
 
 /**
- * A factory of {@link DataWriter} returned by
- * {@link StreamingWriteSupport#createStreamingWriterFactory()}, which is responsible for creating
- * and initializing the actual data writer at executor side.
+ * An interface that defines how to write the data to data source in streaming queries.
  *
- * Note that, the writer factory will be serialized and sent to executors, then the data writer
- * will be created on executors and do the actual writing. So this interface must be
- * serializable and {@link DataWriter} doesn't need to be.
+ * The writing procedure is:
+ *   1. Create a writer factory by {@link #createStreamingWriterFactory()}, serialize and send it to
+ *      all the partitions of the input data(RDD).
+ *   2. For each epoch in each partition, create the data writer, and write the data of the epoch in
+ *      the partition with this writer. If all the data are written successfully, call
+ *      {@link DataWriter#commit()}. If exception happens during the writing, call
+ *      {@link DataWriter#abort()}.
+ *   3. If writers in all partitions of one epoch are successfully committed, call
+ *      {@link #commit(long, WriterCommitMessage[])}. If some writers are aborted, or the job failed
+ *      with an unknown reason, call {@link #abort(long, WriterCommitMessage[])}.
+ *
+ * While Spark will retry failed writing tasks, Spark won't retry failed writing jobs. Users should
+ * do it manually in their Spark applications if they want to retry.
+ *
+ * Please refer to the documentation of commit/abort methods for detailed specifications.
  */
 @Evolving
-public interface StreamingDataWriterFactory extends Serializable {
+public interface StreamingWrite {
 
   /**
-   * Returns a data writer to do the actual writing work. Note that, Spark will reuse the same data
-   * object instance when sending data to the data writer, for better performance. Data writers
-   * are responsible for defensive copies if necessary, e.g. copy the data before buffer it in a
-   * list.
+   * Creates a writer factory which will be serialized and sent to executors.
    *
-   * If this method fails (by throwing an exception), the corresponding Spark write task would fail
-   * and get retried until hitting the maximum retry times.
-   *
-   * @param partitionId A unique id of the RDD partition that the returned writer will process.
-   *                    Usually Spark processes many RDD partitions at the same time,
-   *                    implementations should use the partition id to distinguish writers for
-   *                    different partitions.
-   * @param taskId The task id returned by {@link TaskContext#taskAttemptId()}. Spark may run
-   *               multiple tasks for the same partition (due to speculation or task failures,
-   *               for example).
-   * @param epochId A monotonically increasing id for streaming queries that are split in to
-   *                discrete periods of execution.
+   * If this method fails (by throwing an exception), the action will fail and no Spark job will be
+   * submitted.
    */
-  DataWriter<InternalRow> createWriter(int partitionId, long taskId, long epochId);
+  StreamingDataWriterFactory createStreamingWriterFactory();
+
+  /**
+   * Commits this writing job for the specified epoch with a list of commit messages. The commit
+   * messages are collected from successful data writers and are produced by
+   * {@link DataWriter#commit()}.
+   *
+   * If this method fails (by throwing an exception), this writing job is considered to have been
+   * failed, and the execution engine will attempt to call
+   * {@link #abort(long, WriterCommitMessage[])}.
+   *
+   * The execution engine may call `commit` multiple times for the same epoch in some circumstances.
+   * To support exactly-once data semantics, implementations must ensure that multiple commits for
+   * the same epoch are idempotent.
+   */
+  void commit(long epochId, WriterCommitMessage[] messages);
+
+  /**
+   * Aborts this writing job because some data writers are failed and keep failing when retried, or
+   * the Spark job fails with some unknown reasons, or {@link #commit(long, WriterCommitMessage[])}
+   * fails.
+   *
+   * If this method fails (by throwing an exception), the underlying data source may require manual
+   * cleanup.
+   *
+   * Unless the abort is triggered by the failure of commit, the given messages will have some
+   * null slots, as there may be only a few data writers that were committed before the abort
+   * happens, or some data writers were committed but their commit messages haven't reached the
+   * driver when the abort is triggered. So this is just a "best effort" for data sources to
+   * clean up the data left by data writers.
+   */
+  void abort(long epochId, WriterCommitMessage[] messages);
 }
