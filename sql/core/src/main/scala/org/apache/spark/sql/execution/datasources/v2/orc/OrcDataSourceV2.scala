@@ -42,3 +42,15 @@ class OrcDataSourceV2 extends FileDataSourceV2 {
     OrcTable(tableName, sparkSession, options, Some(schema))
   }
 }
+
+object OrcDataSourceV2 {
+  def supportsDataType(dataType: DataType): Boolean = dataType match {
+    case _: AtomicType => true
+    case st: StructType => st.forall { f => supportsDataType(f.dataType) }
+    case ArrayType(elementType, _) => supportsDataType(elementType)
+    case MapType(keyType, valueType, _) =>
+      supportsDataType(keyType) && supportsDataType(valueType)
+    case udt: UserDefinedType[_] => supportsDataType(udt.sqlType)
+    case _ => false
+  }
+}
