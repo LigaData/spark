@@ -42,8 +42,4 @@ object DataSourceV2Implicits {
       }
     }
   }
-
-  implicit class OptionsHelper(options: Map[String, String]) {
-    def toDataSourceOptions: DataSourceOptions = new DataSourceOptions(options.asJava)
-  }
 }
