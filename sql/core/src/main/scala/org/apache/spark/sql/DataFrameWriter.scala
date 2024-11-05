@@ -34,6 +34,7 @@ import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.sources.v2._
 import org.apache.spark.sql.sources.v2.writer.SupportsSaveMode
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 /**
  * Interface used to write a [[Dataset]] to external storage systems (e.g. file systems,
@@ -248,13 +249,14 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
       val provider = cls.getConstructor().newInstance().asInstanceOf[TableProvider]
       val sessionOptions = DataSourceV2Utils.extractSessionConfigs(
         provider, session.sessionState.conf)
-      val checkFilesExistsOption = DataSourceOptions.CHECK_FILES_EXIST_KEY -> "false"
+      // TODO SPARK-27113: remove this option.
+      val checkFilesExistsOption = "check_files_exist" -> "false"
       val options = sessionOptions ++ extraOptions + checkFilesExistsOption
-      val dsOptions = new DataSourceOptions(options.asJava)
+      val dsOptions = new CaseInsensitiveStringMap(options.asJava)
       provider.getTable(dsOptions) match {
         case table: SupportsBatchWrite =>
           if (mode == SaveMode.Append) {
-            val relation = DataSourceV2Relation.create(table, options)
+            val relation = DataSourceV2Relation.create(table, dsOptions)
             runCommand(df.sparkSession, "save") {
               AppendData.byName(relation, df.logicalPlan)
             }
