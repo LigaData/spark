@@ -97,7 +97,7 @@ case class StreamingDataSourceV2Relation(
 }
 
 object DataSourceV2Relation {
-  def create(table: Table, options: Map[String, String]): DataSourceV2Relation = {
+  def create(table: Table, options: CaseInsensitiveStringMap): DataSourceV2Relation = {
     val output = table.schema().toAttributes
     DataSourceV2Relation(table, output, options)
   }
