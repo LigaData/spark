@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.sources
 
-import org.apache.spark.annotation.Stable
+import org.apache.spark.annotation.{Evolving, Stable}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // This file defines all the filters that we can push down to the data sources.
