@@ -31,8 +31,9 @@ import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
 import org.apache.spark.sql.sources.{AlwaysTrue, Filter}
-import org.apache.spark.sql.sources.v2.{DataSourceOptions, SupportsBatchWrite}
+import org.apache.spark.sql.sources.v2.SupportsBatchWrite
 import org.apache.spark.sql.sources.v2.writer.{BatchWrite, DataWriterFactory, SupportsDynamicOverwrite, SupportsOverwrite, SupportsSaveMode, SupportsTruncate, WriteBuilder, WriterCommitMessage}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.util.{LongAccumulator, Utils}
 
 /**
@@ -54,7 +55,7 @@ case class WriteToDataSourceV2(batchWrite: BatchWrite, query: LogicalPlan)
  */
 case class AppendDataExec(
                            table: SupportsBatchWrite,
-                           writeOptions: DataSourceOptions,
+                           writeOptions: CaseInsensitiveStringMap,
                            query: SparkPlan) extends V2TableWriteExec with BatchWriteHelper {
   override protected def doExecute(): RDD[InternalRow] = {
     val batchWrite = newWriteBuilder() match {
@@ -79,7 +80,7 @@ case class AppendDataExec(
 case class OverwriteByExpressionExec(
                                       table: SupportsBatchWrite,
                                       deleteWhere: Array[Filter],
-                                      writeOptions: DataSourceOptions,
+                                      writeOptions: CaseInsensitiveStringMap,
                                       query: SparkPlan) extends V2TableWriteExec with BatchWriteHelper {
   private def isTruncate(filters: Array[Filter]): Boolean = {
     filters.length == 1 && filters(0).isInstanceOf[AlwaysTrue]
@@ -109,7 +110,7 @@ case class OverwriteByExpressionExec(
  */
 case class OverwritePartitionsDynamicExec(
                                            table: SupportsBatchWrite,
-                                           writeOptions: DataSourceOptions,
+                                           writeOptions: CaseInsensitiveStringMap,
                                            query: SparkPlan) extends V2TableWriteExec with BatchWriteHelper {
   override protected def doExecute(): RDD[InternalRow] = {
     val batchWrite = newWriteBuilder() match {
@@ -124,11 +125,11 @@ case class OverwritePartitionsDynamicExec(
   }
 }
 case class WriteToDataSourceV2Exec(
-                                    batchWrite: BatchWrite,
-                                    query: SparkPlan
-                                  ) extends V2TableWriteExec {
-  import DataSourceV2Implicits._
-  def writeOptions: DataSourceOptions = Map.empty[String, String].toDataSourceOptions
+    batchWrite: BatchWrite,
+    query: SparkPlan) extends V2TableWriteExec {
+
+  def writeOptions: CaseInsensitiveStringMap = CaseInsensitiveStringMap.empty()
+
   override protected def doExecute(): RDD[InternalRow] = {
     doWrite(batchWrite)
   }
@@ -139,7 +140,7 @@ case class WriteToDataSourceV2Exec(
 trait BatchWriteHelper {
   def table: SupportsBatchWrite
   def query: SparkPlan
-  def writeOptions: DataSourceOptions
+  def writeOptions: CaseInsensitiveStringMap
   def newWriteBuilder(): WriteBuilder = {
     table.newWriteBuilder(writeOptions)
       .withInputDataSchema(query.schema)
